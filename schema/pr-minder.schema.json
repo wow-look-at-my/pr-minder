@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
+  "title": "pr-minder config",
+  "description": "Configuration for the pr-minder GitHub App. Supports JSONC (comments allowed). Place at .github/pr-minder.json in any repo, or at pr-minder.json in the org's .github repo (with optional per-repo overrides under 'repos').",
+  "$ref": "#/$defs/baseConfig",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "repos": {
+      "description": "Per-repo config overrides. Only meaningful in the org-level .github/pr-minder.json; ignored in per-repo config files.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/repoConfig" }
+    }
+  },
+  "unevaluatedProperties": false,
+  "$defs": {
+    "triggerCondition": {
+      "description": "A single trigger condition. All specified keys must match (AND). Multiple conditions in the triggers array are ORed.",
+      "type": "object",
+      "minProperties": 1,
+      "unevaluatedProperties": false,
+      "properties": {
+        "label": {
+          "description": "PR must have this label.",
+          "type": "string"
+        },
+        "approved_by": {
+          "description": "PR must be approved by at least one of these GitHub usernames.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "min_approvals": {
+          "description": "PR must have at least this many approvals from any users.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "baseConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Disable pr-minder entirely for this repo.",
+          "type": "boolean",
+          "default": true
+        },
+        "triggers": {
+          "description": "List of trigger conditions. Any passing condition fires a branch update (OR). Keys within a condition are ANDed.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/triggerCondition" }
+        }
+      }
+    },
+    "repoConfig": {
+      "description": "Per-repo overrides. Supports the same fields as the top-level config, except 'repos'.",
+      "$ref": "#/$defs/baseConfig",
+      "unevaluatedProperties": false
+    }
+  }
+}
