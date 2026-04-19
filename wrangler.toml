@@ -5,5 +5,8 @@ compatibility_date = "2026-04-19"
 [observability]
 enabled = true
 
+[observability.traces]
+enabled = true
+
 [vars]
 GITHUB_APP_ID = "3433933"
