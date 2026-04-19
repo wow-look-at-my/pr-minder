@@ -16,6 +16,30 @@
   },
   "unevaluatedProperties": false,
   "$defs": {
+    "triggerCondition": {
+      "description": "A single trigger condition. All specified keys must match (AND). Multiple conditions in the triggers array are ORed.",
+      "type": "object",
+      "minProperties": 1,
+      "unevaluatedProperties": false,
+      "properties": {
+        "label": {
+          "description": "PR must have this label.",
+          "type": "string"
+        },
+        "approved_by": {
+          "description": "PR must be approved by at least one of these GitHub usernames.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "min_approvals": {
+          "description": "PR must have at least this many approvals from any users.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
     "baseConfig": {
       "type": "object",
       "properties": {
@@ -24,20 +48,10 @@
           "type": "boolean",
           "default": true
         },
-        "trigger_label": {
-          "description": "Label that marks a PR for automatic branch updates. Empty string disables this trigger.",
-          "type": "string"
-        },
-        "trigger_approved_by": {
-          "description": "Trigger branch updates when any of these GitHub usernames approves the PR.",
+        "triggers": {
+          "description": "List of trigger conditions. Any passing condition fires a branch update (OR). Keys within a condition are ANDed.",
           "type": "array",
-          "items": { "type": "string" },
-          "uniqueItems": true
-        },
-        "trigger_min_approvals": {
-          "description": "Trigger branch updates when at least this many users have approved. 0 disables.",
-          "type": "integer",
-          "minimum": 0
+          "items": { "$ref": "#/$defs/triggerCondition" }
         }
       }
     },

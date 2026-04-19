@@ -1,5 +1,5 @@
 import type { Env } from './worker';
-import { loadConfig, type PrMinderConfig } from './config';
+import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
 import { installToken, updateBranch, fetchApprovers, gh } from './github';
 
 export async function handle(event: string | null, p: any, env: Env): Promise<void> {
@@ -51,17 +51,28 @@ async function onPushToDefault(p: any, env: Env): Promise<void> {
 }
 
 async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string): Promise<boolean> {
-  if (config.trigger_label && pr.labels.some((l: any) => l.name === config.trigger_label)) {
-    return true;
-  }
-  if (config.trigger_approved_by.length > 0 || config.trigger_min_approvals > 0) {
-    const approvers = await fetchApprovers(repo, pr.number, token);
-    if (config.trigger_approved_by.length > 0 && config.trigger_approved_by.some((u) => approvers.has(u))) {
-      return true;
-    }
-    if (config.trigger_min_approvals > 0 && approvers.size >= config.trigger_min_approvals) {
-      return true;
-    }
+  let approvers: Set<string> | null = null;
+  const getApprovers = async () => {
+    if (approvers === null) approvers = await fetchApprovers(repo, pr.number, token);
+    return approvers;
+  };
+
+  for (const condition of config.triggers) {
+    if (await conditionMet(condition, pr, getApprovers)) return true;
   }
   return false;
+}
+
+async function conditionMet(
+  c: TriggerCondition,
+  pr: any,
+  getApprovers: () => Promise<Set<string>>,
+): Promise<boolean> {
+  if (c.label !== undefined && !pr.labels.some((l: any) => l.name === c.label)) return false;
+  if (c.approved_by !== undefined || c.min_approvals !== undefined) {
+    const approvers = await getApprovers();
+    if (c.approved_by !== undefined && !c.approved_by.some((u) => approvers.has(u))) return false;
+    if (c.min_approvals !== undefined && approvers.size < c.min_approvals) return false;
+  }
+  return true;
 }

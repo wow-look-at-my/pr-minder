@@ -10,11 +10,13 @@ A Cloudflare Worker GitHub App that keeps pull requests up to date with their ba
 
 A PR is updated when **any** configured trigger is satisfied:
 
-| Trigger | Config field | Description |
-|---------|-------------|-------------|
-| Label | `trigger_label` | PR has the specified label |
-| Specific approvers | `trigger_approved_by` | PR approved by any user in the list |
-| Approval count | `trigger_min_approvals` | PR has at least N approvals |
+| Trigger key | Description |
+|-------------|-------------|
+| `label` | PR has the specified label |
+| `approved_by` | PR approved by any user in the list |
+| `min_approvals` | PR has at least N approvals from any users |
+
+Keys within one trigger object are **ANDed**; multiple objects in the `triggers` array are **ORed**.
 
 ## GitHub App setup
 
@@ -52,24 +54,31 @@ Per-repo config at `.github/pr-minder.json` overrides the org-level config at `p
 
 Config files are **JSONC** — `//` and `/* */` comments are supported.
 
+Triggers are an array of condition objects. **Keys within one object are ANDed; multiple objects are ORed.**
+
 **Per-repo** (`.github/pr-minder.json`):
-```json
+```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
-  "trigger_label": "automerge",
-  "trigger_approved_by": ["alice", "bob"],
-  "trigger_min_approvals": 2
+  "triggers": [
+    // fire if labeled "automerge"
+    { "label": "automerge" },
+    // OR if alice/bob approved AND there are at least 2 approvals
+    { "approved_by": ["alice", "bob"], "min_approvals": 2 }
+  ]
 }
 ```
 
 **Org-level** (`{org}/.github/pr-minder.json`) with per-repo overrides:
-```json
+```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
-  "trigger_label": "automerge",
+  "triggers": [
+    { "label": "automerge" }
+  ],
   "repos": {
     "special-repo": {
-      "trigger_label": "ready-to-merge"
+      "triggers": [{ "label": "ready-to-merge" }]
     },
     "opt-out-repo": {
       "enabled": false
@@ -78,7 +87,7 @@ Config files are **JSONC** — `//` and `/* */` comments are supported.
 }
 ```
 
-All config fields are optional. The JSON Schema at [`schema/pr-minder.schema.json`](schema/pr-minder.schema.json) provides IDE validation and autocomplete when referenced via `$schema`.
+The JSON Schema at [`schema/pr-minder.schema.json`](schema/pr-minder.schema.json) provides IDE validation and autocomplete when referenced via `$schema`.
 
 ## Pairing with GitHub auto-merge
 
