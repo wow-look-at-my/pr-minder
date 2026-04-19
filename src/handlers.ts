@@ -3,7 +3,7 @@ import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config
 import { installToken, updateBranch, fetchApprovers, gh } from './github';
 
 export async function handle(event: string | null, p: any, env: Env): Promise<void> {
-  if (event === 'pull_request' && ['labeled', 'synchronize', 'reopened'].includes(p.action)) {
+  if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'synchronize'].includes(p.action)) {
     return onPR(p, env);
   }
   // Webhook payload uses lowercase state; REST API uses uppercase — different conventions.
