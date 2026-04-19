@@ -2,5 +2,8 @@ name = "pr-minder"
 main = "src/worker.ts"
 compatibility_date = "2026-04-19"
 
+[observability]
+enabled = true
+
 [vars]
-GITHUB_APP_ID = "123456"
+GITHUB_APP_ID = "3433933"
