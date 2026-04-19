@@ -27,7 +27,7 @@ export default {
   },
 };
 
-async function verifyWebhook(secret: string, sigHeader: string, body: string): Promise<boolean> {
+export async function verifyWebhook(secret: string, sigHeader: string, body: string): Promise<boolean> {
   const expected = sigHeader.replace(/^sha256=/, '');
   if (expected.length !== 64) return false;
   const key = await crypto.subtle.importKey(

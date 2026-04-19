@@ -63,7 +63,7 @@ async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token:
   return false;
 }
 
-async function conditionMet(
+export async function conditionMet(
   c: TriggerCondition,
   pr: any,
   getApprovers: () => Promise<Set<string>>,

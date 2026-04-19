@@ -38,7 +38,7 @@ export async function loadConfig(owner: string, repo: string, token: string): Pr
   return DISABLED;
 }
 
-function mergeConfig(top: any, override: any): PrMinderConfig {
+export function mergeConfig(top: any, override: any): PrMinderConfig {
   const result: PrMinderConfig = { enabled: true, triggers: [] };
   for (const src of [top, override]) {
     if (!src) continue;
