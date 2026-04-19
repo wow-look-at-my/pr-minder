@@ -7,6 +7,9 @@
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "strip-json-comments": "^5.0.1"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260419.0",
     "typescript": "^5.4.5",

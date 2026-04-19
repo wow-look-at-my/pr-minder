@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
   "title": "pr-minder config",
-  "description": "Configuration for the pr-minder GitHub App. Place at .github/pr-minder.json in any repo, or at pr-minder.json in the org's .github repo (with optional per-repo overrides under 'repos').",
+  "description": "Configuration for the pr-minder GitHub App. Supports JSONC (comments allowed). Place at .github/pr-minder.json in any repo, or at pr-minder.json in the org's .github repo (with optional per-repo overrides under 'repos').",
   "type": "object",
   "additionalProperties": false,
   "properties": {

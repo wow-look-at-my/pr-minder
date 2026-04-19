@@ -1,4 +1,9 @@
+import stripJsonComments from 'strip-json-comments';
 import { gh } from './github';
+
+function parseJsonc(text: string): any {
+  return parseJsonc(stripJsonComments(text));
+}
 
 export interface PrMinderConfig {
   enabled: boolean;
@@ -24,13 +29,13 @@ export async function loadConfig(
 
   try {
     const json = await fetchRepoFile(owner, repo, CONFIG_FILE, token);
-    if (json !== null) return mergeConfig(defaults, JSON.parse(json), null);
+    if (json !== null) return mergeConfig(defaults, parseJsonc(json), null);
   } catch { /* fall through */ }
 
   try {
     const json = await fetchRepoFile(owner, '.github', 'pr-minder.json', token);
     if (json !== null) {
-      const parsed = JSON.parse(json);
+      const parsed = parseJsonc(json);
       return mergeConfig(defaults, parsed, parsed?.repos?.[repo]);
     }
   } catch { /* fall through */ }
