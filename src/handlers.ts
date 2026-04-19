@@ -18,7 +18,10 @@ export async function handle(event: string | null, p: any, env: Env): Promise<vo
 async function onPR(p: any, env: Env): Promise<void> {
   const pr = p.pull_request;
   if (pr.draft) return;
-  if (pr.mergeable_state !== 'behind') return;
+  // GitHub returns one priority-ordered mergeable_state. A PR that is behind AND blocked-by-review
+  // reports 'blocked', masking the behind-ness. 'unknown' can also appear before GitHub finishes the
+  // async mergeability compute. Treat these as "maybe behind" — updateBranch returns 422 if not.
+  if (!['behind', 'blocked', 'unknown'].includes(pr.mergeable_state)) return;
 
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
   const [owner, repo] = p.repository.full_name.split('/');
