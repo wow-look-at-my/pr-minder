@@ -1,6 +1,7 @@
 // MIT
 // GitHub App must subscribe to: pull_request, pull_request_review, push
 import { handle } from './handlers';
+import { Logger } from './logger';
 
 export interface Env {
   GITHUB_APP_ID: string;
@@ -9,7 +10,7 @@ export interface Env {
 }
 
 export default {
-  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(req: Request, env: Env): Promise<Response> {
     if (req.method !== 'POST') return new Response('nope', { status: 405 });
 
     const body = await req.text();
@@ -21,9 +22,13 @@ export default {
     const event = req.headers.get('x-github-event');
     const payload = JSON.parse(body);
 
-    // Ack fast, work async (GitHub times out at 10s)
-    ctx.waitUntil(handle(event, payload, env).catch((e) => console.error(e)));
-    return new Response('ok');
+    const log = new Logger();
+    try {
+      await handle(event, payload, env, log);
+    } catch (e) {
+      log.log(`error: ${(e as Error).stack ?? (e as Error).message}`);
+    }
+    return new Response(log.toString() || 'ok', { headers: { 'content-type': 'text/plain' } });
   },
 };
 

@@ -1,5 +1,6 @@
 import stripJsonComments from 'strip-json-comments';
 import { gh } from './github';
+import type { Logger } from './logger';
 
 function parseJsonc(text: string): any {
   return JSON.parse(stripJsonComments(text));
@@ -21,20 +22,25 @@ const CONFIG_FILE = '.github/pr-minder.json';
 // Nothing fires without a config file — opt-in per repo or via org .github repo.
 const DISABLED: PrMinderConfig = { enabled: false, triggers: [] };
 
-export async function loadConfig(owner: string, repo: string, token: string): Promise<PrMinderConfig> {
+export async function loadConfig(owner: string, repo: string, token: string, log: Logger): Promise<PrMinderConfig> {
   try {
-    const json = await fetchRepoFile(owner, repo, CONFIG_FILE, token);
-    if (json !== null) return mergeConfig(parseJsonc(json), null);
-  } catch { /* fall through */ }
+    const json = await fetchRepoFile(owner, repo, CONFIG_FILE, token, log);
+    if (json !== null) {
+      log.log(`config: per-repo ${owner}/${repo}/${CONFIG_FILE}`);
+      return mergeConfig(parseJsonc(json), null);
+    }
+  } catch (e) { log.log(`config: per-repo fetch failed: ${(e as Error).message}`); }
 
   try {
-    const json = await fetchRepoFile(owner, '.github', '.github/config/pr-minder/pr-minder.json', token);
+    const json = await fetchRepoFile(owner, '.github', '.github/config/pr-minder/pr-minder.json', token, log);
     if (json !== null) {
+      log.log(`config: org-level ${owner}/.github`);
       const parsed = parseJsonc(json);
       return mergeConfig(parsed, parsed?.repos?.[repo]);
     }
-  } catch { /* fall through */ }
+  } catch (e) { log.log(`config: org fetch failed: ${(e as Error).message}`); }
 
+  log.log(`config: none found, disabled`);
   return DISABLED;
 }
 
@@ -48,8 +54,8 @@ export function mergeConfig(top: any, override: any): PrMinderConfig {
   return result;
 }
 
-async function fetchRepoFile(owner: string, repo: string, path: string, token: string): Promise<string | null> {
-  const r = await gh(`/repos/${owner}/${repo}/contents/${path}`, token);
+async function fetchRepoFile(owner: string, repo: string, path: string, token: string, log: Logger): Promise<string | null> {
+  const r = await gh(`/repos/${owner}/${repo}/contents/${path}`, token, log);
   if (r.status === 404) return null;
   if (!r.ok) return null;
   const data: any = await r.json();
