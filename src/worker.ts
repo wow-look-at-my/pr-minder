@@ -1,10 +1,22 @@
 // MIT
+import { parse as parseYaml } from 'yaml';
+
 interface Env {
   GITHUB_APP_ID: string;
   GITHUB_APP_PRIVATE_KEY: string; // PEM, PKCS8
   WEBHOOK_SECRET: string;
-  AUTOMERGE_LABEL: string; // e.g. "automerge"
+  AUTOMERGE_LABEL: string; // fallback when no .github/pr-minder.yml is found
 }
+
+interface PrMinderConfig {
+  enabled: boolean;
+  trigger_label: string;         // "" = disabled
+  trigger_approved_by: string[]; // any match fires; empty = disabled
+  trigger_min_approvals: number; // 0 = disabled
+}
+
+// GitHub App must subscribe to: pull_request, pull_request_review, push
+const CONFIG_FILE = '.github/pr-minder.yml';
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -29,6 +41,10 @@ async function handle(event: string | null, p: any, env: Env) {
   if (event === 'pull_request' && ['labeled', 'synchronize', 'reopened'].includes(p.action)) {
     return onPR(p, env);
   }
+  // Webhook payload uses lowercase state; REST API uses uppercase — different conventions.
+  if (event === 'pull_request_review' && p.action === 'submitted' && p.review?.state === 'approved') {
+    return onPR(p, env);
+  }
   if (event === 'push' && p.ref === `refs/heads/${p.repository.default_branch}`) {
     return onPushToDefault(p, env);
   }
@@ -37,25 +53,30 @@ async function handle(event: string | null, p: any, env: Env) {
 async function onPR(p: any, env: Env) {
   const pr = p.pull_request;
   if (pr.draft) return;
-  if (!pr.labels.some((l: any) => l.name === env.AUTOMERGE_LABEL)) return;
   if (pr.mergeable_state !== 'behind') return;
 
   const token = await installToken(p.installation.id, env);
+  const [owner, repo] = p.repository.full_name.split('/');
+  const config = await loadConfig(owner, repo, token, env);
+
+  if (!config.enabled) return;
+  if (!(await prQualifies(pr, p.repository.full_name, config, token))) return;
+
   await updateBranch(p.repository.full_name, pr.number, token);
 }
 
 async function onPushToDefault(p: any, env: Env) {
   const token = await installToken(p.installation.id, env);
   const [owner, repo] = p.repository.full_name.split('/');
+  const config = await loadConfig(owner, repo, token, env);
+  if (!config.enabled) return;
 
   const r = await gh(`/repos/${owner}/${repo}/pulls?state=open&per_page=100`, token);
   const prs: any[] = await r.json();
 
   for (const pr of prs) {
     if (pr.draft) continue;
-    if (!pr.labels.some((l: any) => l.name === env.AUTOMERGE_LABEL)) continue;
-    // mergeable_state on list endpoint is often 'unknown'; let GitHub compute it.
-    // update-branch is idempotent-ish: it returns 422 if already up-to-date.
+    if (!(await prQualifies(pr, p.repository.full_name, config, token))) continue;
     try {
       await updateBranch(p.repository.full_name, pr.number, token);
     } catch (e) {
@@ -63,6 +84,83 @@ async function onPushToDefault(p: any, env: Env) {
     }
   }
 }
+
+async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string): Promise<boolean> {
+  if (config.trigger_label && pr.labels.some((l: any) => l.name === config.trigger_label)) {
+    return true;
+  }
+  if (config.trigger_approved_by.length > 0 || config.trigger_min_approvals > 0) {
+    const approvers = await fetchApprovers(repo, pr.number, token);
+    if (config.trigger_approved_by.length > 0 && config.trigger_approved_by.some((u) => approvers.has(u))) {
+      return true;
+    }
+    if (config.trigger_min_approvals > 0 && approvers.size >= config.trigger_min_approvals) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function fetchApprovers(repo: string, num: number, token: string): Promise<Set<string>> {
+  const r = await gh(`/repos/${repo}/pulls/${num}/reviews?per_page=100`, token);
+  if (!r.ok) return new Set();
+  const reviews: any[] = await r.json();
+  // Latest non-pending review per user determines their standing vote
+  const latest = new Map<string, string>();
+  for (const rev of reviews) {
+    if (rev.state !== 'PENDING') latest.set(rev.user.login, rev.state);
+  }
+  return new Set([...latest].filter(([, state]) => state === 'APPROVED').map(([u]) => u));
+}
+
+// Config loading -----------------------------------------------------------------
+
+async function loadConfig(owner: string, repo: string, token: string, env: Env): Promise<PrMinderConfig> {
+  const defaults: PrMinderConfig = {
+    enabled: true,
+    trigger_label: env.AUTOMERGE_LABEL,
+    trigger_approved_by: [],
+    trigger_min_approvals: 0,
+  };
+
+  try {
+    const yaml = await fetchRepoFile(owner, repo, CONFIG_FILE, token);
+    if (yaml !== null) return mergeConfig(defaults, parseYaml(yaml), null);
+  } catch { /* fall through */ }
+
+  try {
+    const yaml = await fetchRepoFile(owner, '.github', 'pr-minder.yml', token);
+    if (yaml !== null) {
+      const parsed = parseYaml(yaml);
+      return mergeConfig(defaults, parsed, parsed?.repos?.[repo]);
+    }
+  } catch { /* fall through */ }
+
+  return defaults;
+}
+
+function mergeConfig(base: PrMinderConfig, top: any, override: any): PrMinderConfig {
+  const result = { ...base };
+  for (const src of [top, override]) {
+    if (!src) continue;
+    if (typeof src.enabled === 'boolean') result.enabled = src.enabled;
+    if (typeof src.trigger_label === 'string') result.trigger_label = src.trigger_label;
+    if (Array.isArray(src.trigger_approved_by)) result.trigger_approved_by = src.trigger_approved_by as string[];
+    if (typeof src.trigger_min_approvals === 'number') result.trigger_min_approvals = src.trigger_min_approvals;
+  }
+  return result;
+}
+
+async function fetchRepoFile(owner: string, repo: string, path: string, token: string): Promise<string | null> {
+  const r = await gh(`/repos/${owner}/${repo}/contents/${path}`, token);
+  if (r.status === 404) return null;
+  if (!r.ok) return null;
+  const data: any = await r.json();
+  if (data.encoding !== 'base64') return null;
+  return atob(data.content.replace(/\s/g, ''));
+}
+
+// GitHub API helpers -------------------------------------------------------------
 
 async function updateBranch(repo: string, num: number, token: string) {
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}/update-branch`, {
@@ -82,7 +180,7 @@ function ghHeaders(token: string): HeadersInit {
     authorization: `Bearer ${token}`,
     accept: 'application/vnd.github+json',
     'x-github-api-version': '2022-11-28',
-    'user-agent': 'automerge-worker',
+    'user-agent': 'pr-minder',
   };
 }
 
@@ -93,11 +191,11 @@ async function installToken(installId: number, env: Env): Promise<string> {
     headers: {
       authorization: `Bearer ${jwt}`,
       accept: 'application/vnd.github+json',
-      'user-agent': 'automerge-worker',
+      'user-agent': 'pr-minder',
     },
   });
   if (!r.ok) throw new Error(`token: ${r.status} ${await r.text()}`);
-  return (await r.json() as any).token;
+  return ((await r.json()) as any).token;
 }
 
 async function appJWT(appId: string, pem: string): Promise<string> {
