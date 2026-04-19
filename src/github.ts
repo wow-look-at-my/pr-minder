@@ -1,5 +1,9 @@
-export function gh(path: string, token: string) {
-  return fetch(`https://api.github.com${path}`, { headers: ghHeaders(token) });
+import type { Logger } from './logger';
+
+export async function gh(path: string, token: string, log: Logger) {
+  const r = await fetch(`https://api.github.com${path}`, { headers: ghHeaders(token) });
+  if (!r.ok && r.status !== 404) log.log(`gh ${path}: ${r.status}`);
+  return r;
 }
 
 export function ghHeaders(token: string): HeadersInit {
@@ -11,7 +15,7 @@ export function ghHeaders(token: string): HeadersInit {
   };
 }
 
-export async function installToken(installId: number, appId: string, privateKey: string): Promise<string> {
+export async function installToken(installId: number, appId: string, privateKey: string, log: Logger): Promise<string> {
   const jwt = await appJWT(appId, privateKey);
   const r = await fetch(`https://api.github.com/app/installations/${installId}/access_tokens`, {
     method: 'POST',
@@ -21,21 +25,29 @@ export async function installToken(installId: number, appId: string, privateKey:
       'user-agent': 'automerge-worker',
     },
   });
-  if (!r.ok) throw new Error(`token: ${r.status} ${await r.text()}`);
+  if (!r.ok) {
+    const body = await r.text();
+    log.log(`installToken id=${installId}: ${r.status} ${body}`);
+    throw new Error(`token: ${r.status} ${body}`);
+  }
   return ((await r.json()) as any).token;
 }
 
-export async function updateBranch(repo: string, num: number, token: string): Promise<void> {
+export async function updateBranch(repo: string, num: number, token: string, log: Logger): Promise<void> {
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}/update-branch`, {
     method: 'PUT',
     headers: ghHeaders(token),
   });
   if (r.status === 422) return; // already up to date
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  if (!r.ok) {
+    const body = await r.text();
+    log.log(`updateBranch ${repo}#${num}: ${r.status} ${body}`);
+    throw new Error(`${r.status}: ${body}`);
+  }
 }
 
-export async function fetchApprovers(repo: string, num: number, token: string): Promise<Set<string>> {
-  const r = await gh(`/repos/${repo}/pulls/${num}/reviews?per_page=100`, token);
+export async function fetchApprovers(repo: string, num: number, token: string, log: Logger): Promise<Set<string>> {
+  const r = await gh(`/repos/${repo}/pulls/${num}/reviews?per_page=100`, token, log);
   if (!r.ok) return new Set();
   const reviews: any[] = await r.json();
   // Latest non-pending review per user determines their standing vote

@@ -1,62 +1,93 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
 import { installToken, updateBranch, fetchApprovers, gh } from './github';
+import type { Logger } from './logger';
 
-export async function handle(event: string | null, p: any, env: Env): Promise<void> {
-  if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'synchronize'].includes(p.action)) {
-    return onPR(p, env);
+export async function handle(event: string | null, p: any, env: Env, log: Logger): Promise<void> {
+  const repo = p.repository?.full_name;
+  const action = p.action;
+  const prNum = p.pull_request?.number;
+  log.log(`event=${event} action=${action} repo=${repo} pr=${prNum}`);
+
+  if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'synchronize'].includes(action)) {
+    return onPR(p, env, log);
   }
   // Webhook payload uses lowercase state; REST API uses uppercase — different conventions.
-  if (event === 'pull_request_review' && p.action === 'submitted' && p.review?.state === 'approved') {
-    return onPR(p, env);
+  if (event === 'pull_request_review' && action === 'submitted' && p.review?.state === 'approved') {
+    return onPR(p, env, log);
   }
   if (event === 'push' && p.ref === `refs/heads/${p.repository.default_branch}`) {
-    return onPushToDefault(p, env);
+    return onPushToDefault(p, env, log);
   }
+  log.log(`skip: no handler matched (event=${event} action=${action})`);
 }
 
-async function onPR(p: any, env: Env): Promise<void> {
+async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   const pr = p.pull_request;
-  if (pr.draft) return;
+  const repo = p.repository.full_name;
+  const tag = `${repo}#${pr.number}`;
+
+  if (pr.draft) {
+    log.log(`${tag}: skip (draft)`);
+    return;
+  }
   // GitHub returns one priority-ordered mergeable_state. A PR that is behind AND blocked-by-review
   // reports 'blocked', masking the behind-ness. 'unknown' can also appear before GitHub finishes the
   // async mergeability compute. Treat these as "maybe behind" — updateBranch returns 422 if not.
-  if (!['behind', 'blocked', 'unknown'].includes(pr.mergeable_state)) return;
+  if (!['behind', 'blocked', 'unknown'].includes(pr.mergeable_state)) {
+    log.log(`${tag}: skip (mergeable_state=${pr.mergeable_state})`);
+    return;
+  }
 
-  const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
-  const [owner, repo] = p.repository.full_name.split('/');
-  const config = await loadConfig(owner, repo, token);
+  const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  const [owner, name] = repo.split('/');
+  const config = await loadConfig(owner, name, token, log);
+  log.log(`${tag}: config enabled=${config.enabled} triggers=${config.triggers.length}`);
 
   if (!config.enabled) return;
-  if (!(await prQualifies(pr, p.repository.full_name, config, token))) return;
+  if (!(await prQualifies(pr, repo, config, token, log))) {
+    log.log(`${tag}: skip (no trigger matched; labels=${JSON.stringify(pr.labels?.map((l: any) => l.name))})`);
+    return;
+  }
 
-  await updateBranch(p.repository.full_name, pr.number, token);
+  log.log(`${tag}: updateBranch`);
+  await updateBranch(repo, pr.number, token, log);
+  log.log(`${tag}: updateBranch ok`);
 }
 
-async function onPushToDefault(p: any, env: Env): Promise<void> {
-  const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
-  const [owner, repo] = p.repository.full_name.split('/');
-  const config = await loadConfig(owner, repo, token);
+async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
+  const repo = p.repository.full_name;
+  const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  const [owner, name] = repo.split('/');
+  const config = await loadConfig(owner, name, token, log);
+  log.log(`${repo} push: config enabled=${config.enabled} triggers=${config.triggers.length}`);
   if (!config.enabled) return;
 
-  const r = await gh(`/repos/${owner}/${repo}/pulls?state=open&per_page=100`, token);
+  const r = await gh(`/repos/${owner}/${name}/pulls?state=open&per_page=100`, token, log);
   const prs: any[] = await r.json();
+  log.log(`${repo} push: scanning ${prs.length} open PRs`);
 
   for (const pr of prs) {
-    if (pr.draft) continue;
-    if (!(await prQualifies(pr, p.repository.full_name, config, token))) continue;
+    const tag = `${repo}#${pr.number}`;
+    if (pr.draft) { log.log(`${tag}: skip (draft)`); continue; }
+    if (!(await prQualifies(pr, repo, config, token, log))) {
+      log.log(`${tag}: skip (no trigger matched)`);
+      continue;
+    }
     try {
-      await updateBranch(p.repository.full_name, pr.number, token);
+      log.log(`${tag}: updateBranch`);
+      await updateBranch(repo, pr.number, token, log);
+      log.log(`${tag}: updateBranch ok`);
     } catch (e) {
-      console.log(`skip ${owner}/${repo}#${pr.number}: ${(e as Error).message}`);
+      log.log(`${tag}: updateBranch failed: ${(e as Error).message}`);
     }
   }
 }
 
-async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string): Promise<boolean> {
+async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<boolean> {
   let approvers: Set<string> | null = null;
   const getApprovers = async () => {
-    if (approvers === null) approvers = await fetchApprovers(repo, pr.number, token);
+    if (approvers === null) approvers = await fetchApprovers(repo, pr.number, token, log);
     return approvers;
   };
 
