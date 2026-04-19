@@ -1,5 +1,7 @@
-export function gh(path: string, token: string) {
-  return fetch(`https://api.github.com${path}`, { headers: ghHeaders(token) });
+export async function gh(path: string, token: string) {
+  const r = await fetch(`https://api.github.com${path}`, { headers: ghHeaders(token) });
+  if (!r.ok && r.status !== 404) console.log(`gh ${path}: ${r.status}`);
+  return r;
 }
 
 export function ghHeaders(token: string): HeadersInit {
@@ -21,7 +23,11 @@ export async function installToken(installId: number, appId: string, privateKey:
       'user-agent': 'automerge-worker',
     },
   });
-  if (!r.ok) throw new Error(`token: ${r.status} ${await r.text()}`);
+  if (!r.ok) {
+    const body = await r.text();
+    console.log(`installToken id=${installId}: ${r.status} ${body}`);
+    throw new Error(`token: ${r.status} ${body}`);
+  }
   return ((await r.json()) as any).token;
 }
 
@@ -31,7 +37,11 @@ export async function updateBranch(repo: string, num: number, token: string): Pr
     headers: ghHeaders(token),
   });
   if (r.status === 422) return; // already up to date
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  if (!r.ok) {
+    const body = await r.text();
+    console.log(`updateBranch ${repo}#${num}: ${r.status} ${body}`);
+    throw new Error(`${r.status}: ${body}`);
+  }
 }
 
 export async function fetchApprovers(repo: string, num: number, token: string): Promise<Set<string>> {
