@@ -28,7 +28,7 @@ export async function loadConfig(owner: string, repo: string, token: string): Pr
   } catch { /* fall through */ }
 
   try {
-    const json = await fetchRepoFile(owner, '.github', 'pr-minder.json', token);
+    const json = await fetchRepoFile(owner, '.github', '.github/config/pr-minder/pr-minder.json', token);
     if (json !== null) {
       const parsed = parseJsonc(json);
       return mergeConfig(parsed, parsed?.repos?.[repo]);

@@ -50,7 +50,7 @@ npm run deploy
 
 ## Configuration
 
-Per-repo config at `.github/pr-minder.json` overrides the org-level config at `pr-minder.json` in the org's `.github` repo. **If no config file is found, all triggers are disabled** — pr-minder is opt-in.
+Per-repo config at `.github/pr-minder.json` overrides the org-level config at `.github/config/pr-minder/pr-minder.json` in the org's `.github` repo. **If no config file is found, all triggers are disabled** — pr-minder is opt-in.
 
 Config files are **JSONC** — `//` and `/* */` comments are supported.
 
@@ -69,7 +69,7 @@ Triggers are an array of condition objects. **Keys within one object are ANDed; 
 }
 ```
 
-**Org-level** (`{org}/.github/pr-minder.json`) with per-repo overrides:
+**Org-level** (in the `{org}/.github` repo, at `.github/config/pr-minder/pr-minder.json`) with per-repo overrides:
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
