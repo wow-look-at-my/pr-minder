@@ -3,31 +3,10 @@
   "$id": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
   "title": "pr-minder config",
   "description": "Configuration for the pr-minder GitHub App. Supports JSONC (comments allowed). Place at .github/pr-minder.json in any repo, or at pr-minder.json in the org's .github repo (with optional per-repo overrides under 'repos').",
-  "type": "object",
-  "additionalProperties": false,
+  "$ref": "#/$defs/baseConfig",
   "properties": {
     "$schema": {
       "type": "string"
-    },
-    "enabled": {
-      "description": "Disable pr-minder entirely for this repo.",
-      "type": "boolean",
-      "default": true
-    },
-    "trigger_label": {
-      "description": "Label that marks a PR for automatic branch updates. Empty string disables this trigger.",
-      "type": "string"
-    },
-    "trigger_approved_by": {
-      "description": "Trigger branch updates when any of these GitHub usernames approves the PR.",
-      "type": "array",
-      "items": { "type": "string" },
-      "uniqueItems": true
-    },
-    "trigger_min_approvals": {
-      "description": "Trigger branch updates when at least this many users have approved. 0 disables.",
-      "type": "integer",
-      "minimum": 0
     },
     "repos": {
       "description": "Per-repo config overrides. Only meaningful in the org-level .github/pr-minder.json; ignored in per-repo config files.",
@@ -35,28 +14,37 @@
       "additionalProperties": { "$ref": "#/$defs/repoConfig" }
     }
   },
+  "unevaluatedProperties": false,
   "$defs": {
-    "repoConfig": {
-      "description": "Per-repo overrides. Supports the same fields as the top-level config, except 'repos'.",
+    "baseConfig": {
       "type": "object",
-      "additionalProperties": false,
       "properties": {
         "enabled": {
-          "type": "boolean"
+          "description": "Disable pr-minder entirely for this repo.",
+          "type": "boolean",
+          "default": true
         },
         "trigger_label": {
+          "description": "Label that marks a PR for automatic branch updates. Empty string disables this trigger.",
           "type": "string"
         },
         "trigger_approved_by": {
+          "description": "Trigger branch updates when any of these GitHub usernames approves the PR.",
           "type": "array",
           "items": { "type": "string" },
           "uniqueItems": true
         },
         "trigger_min_approvals": {
+          "description": "Trigger branch updates when at least this many users have approved. 0 disables.",
           "type": "integer",
           "minimum": 0
         }
       }
+    },
+    "repoConfig": {
+      "description": "Per-repo overrides. Supports the same fields as the top-level config, except 'repos'.",
+      "$ref": "#/$defs/baseConfig",
+      "unevaluatedProperties": false
     }
   }
 }
