@@ -1,0 +1,7 @@
+name = "automerge-worker"
+main = "src/worker.ts"
+compatibility_date = "2026-04-19"
+
+[vars]
+AUTOMERGE_LABEL = "automerge"
+GITHUB_APP_ID = "123456"
