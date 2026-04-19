@@ -36,7 +36,7 @@ Set via `wrangler secret put <NAME>`:
 
 1. `{repo}/.github/pr-minder.json` — per-repo (highest priority)
 2. `{org}/.github/pr-minder.json` → `repos.{repo}` field for per-repo overrides, top-level for org defaults
-3. `AUTOMERGE_LABEL` worker var — fallback default label
+3. No config found → all triggers disabled (opt-in design; nothing fires by default)
 
 ## Key invariants
 

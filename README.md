@@ -48,7 +48,7 @@ npm run deploy
 
 ## Configuration
 
-Per-repo config at `.github/pr-minder.json` overrides the org-level config at `pr-minder.json` in the org's `.github` repo. The `AUTOMERGE_LABEL` worker var is the fallback if no config file is found.
+Per-repo config at `.github/pr-minder.json` overrides the org-level config at `pr-minder.json` in the org's `.github` repo. **If no config file is found, all triggers are disabled** — pr-minder is opt-in.
 
 Config files are **JSONC** — `//` and `/* */` comments are supported.
 

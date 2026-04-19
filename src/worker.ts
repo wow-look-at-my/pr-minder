@@ -6,7 +6,6 @@ export interface Env {
   GITHUB_APP_ID: string;
   GITHUB_APP_PRIVATE_KEY: string; // PEM, PKCS8
   WEBHOOK_SECRET: string;
-  AUTOMERGE_LABEL: string; // fallback when no .github/pr-minder.json exists
 }
 
 export default {

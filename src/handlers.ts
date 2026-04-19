@@ -22,7 +22,7 @@ async function onPR(p: any, env: Env): Promise<void> {
 
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
   const [owner, repo] = p.repository.full_name.split('/');
-  const config = await loadConfig(owner, repo, token, env.AUTOMERGE_LABEL);
+  const config = await loadConfig(owner, repo, token);
 
   if (!config.enabled) return;
   if (!(await prQualifies(pr, p.repository.full_name, config, token))) return;
@@ -33,7 +33,7 @@ async function onPR(p: any, env: Env): Promise<void> {
 async function onPushToDefault(p: any, env: Env): Promise<void> {
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
   const [owner, repo] = p.repository.full_name.split('/');
-  const config = await loadConfig(owner, repo, token, env.AUTOMERGE_LABEL);
+  const config = await loadConfig(owner, repo, token);
   if (!config.enabled) return;
 
   const r = await gh(`/repos/${owner}/${repo}/pulls?state=open&per_page=100`, token);

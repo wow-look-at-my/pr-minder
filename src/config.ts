@@ -2,7 +2,7 @@ import stripJsonComments from 'strip-json-comments';
 import { gh } from './github';
 
 function parseJsonc(text: string): any {
-  return parseJsonc(stripJsonComments(text));
+  return JSON.parse(stripJsonComments(text));
 }
 
 export interface PrMinderConfig {
@@ -14,43 +14,43 @@ export interface PrMinderConfig {
 
 const CONFIG_FILE = '.github/pr-minder.json';
 
-export async function loadConfig(
-  owner: string,
-  repo: string,
-  token: string,
-  defaultLabel: string,
-): Promise<PrMinderConfig> {
-  const defaults: PrMinderConfig = {
-    enabled: true,
-    trigger_label: defaultLabel,
-    trigger_approved_by: [],
-    trigger_min_approvals: 0,
-  };
+// No triggers fire if no config file is found — opt-in per repo or via org .github repo.
+const DISABLED: PrMinderConfig = {
+  enabled: false,
+  trigger_label: '',
+  trigger_approved_by: [],
+  trigger_min_approvals: 0,
+};
 
+export async function loadConfig(owner: string, repo: string, token: string): Promise<PrMinderConfig> {
   try {
     const json = await fetchRepoFile(owner, repo, CONFIG_FILE, token);
-    if (json !== null) return mergeConfig(defaults, parseJsonc(json), null);
+    if (json !== null) return mergeConfig(parseJsonc(json), null);
   } catch { /* fall through */ }
 
   try {
     const json = await fetchRepoFile(owner, '.github', 'pr-minder.json', token);
     if (json !== null) {
       const parsed = parseJsonc(json);
-      return mergeConfig(defaults, parsed, parsed?.repos?.[repo]);
+      return mergeConfig(parsed, parsed?.repos?.[repo]);
     }
   } catch { /* fall through */ }
 
-  return defaults;
+  return DISABLED;
 }
 
-function mergeConfig(base: PrMinderConfig, top: any, override: any): PrMinderConfig {
-  const result = { ...base };
+function mergeConfig(top: any, override: any): PrMinderConfig {
+  const result = { ...DISABLED };
   for (const src of [top, override]) {
     if (!src) continue;
     if (typeof src.enabled === 'boolean') result.enabled = src.enabled;
     if (typeof src.trigger_label === 'string') result.trigger_label = src.trigger_label;
     if (Array.isArray(src.trigger_approved_by)) result.trigger_approved_by = src.trigger_approved_by as string[];
     if (typeof src.trigger_min_approvals === 'number') result.trigger_min_approvals = src.trigger_min_approvals;
+  }
+  // A config file being present implies enabled unless explicitly set to false.
+  if (typeof top?.enabled !== 'boolean' && typeof override?.enabled !== 'boolean') {
+    result.enabled = true;
   }
   return result;
 }
