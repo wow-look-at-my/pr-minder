@@ -38,12 +38,13 @@ export async function updateBranch(repo: string, num: number, token: string, log
     method: 'PUT',
     headers: ghHeaders(token),
   });
-  if (r.status === 422) return; // already up to date
-  if (!r.ok) {
-    const body = await r.text();
-    log.log(`updateBranch ${repo}#${num}: ${r.status} ${body}`);
-    throw new Error(`${r.status}: ${body}`);
-  }
+  if (r.ok) return;
+  // 422 is GitHub's catch-all "Unprocessable Entity" — could be "not behind" (no-op),
+  // but also merge conflict, blocked-by-protection, etc. Log the body so we can tell.
+  const body = await r.text();
+  log.log(`updateBranch ${repo}#${num}: ${r.status} ${body}`);
+  if (r.status === 422 && /not behind|up.?to.?date|merge commit/i.test(body)) return;
+  throw new Error(`${r.status}: ${body}`);
 }
 
 export async function fetchApprovers(repo: string, num: number, token: string, log: Logger): Promise<Set<string>> {
