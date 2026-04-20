@@ -32,9 +32,10 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
     return;
   }
   // GitHub returns one priority-ordered mergeable_state. A PR that is behind AND blocked-by-review
-  // reports 'blocked', masking the behind-ness. 'unknown' can also appear before GitHub finishes the
-  // async mergeability compute. Treat these as "maybe behind" — updateBranch returns 422 if not.
-  if (!['behind', 'blocked', 'unknown'].includes(pr.mergeable_state)) {
+  // reports 'blocked', masking the behind-ness. 'unknown' and 'unstable' can appear in the webhook
+  // payload before GitHub finishes the async mergeability compute. Treat these as "maybe behind" —
+  // updateBranch returns 422 if not.
+  if (!['behind', 'blocked', 'unknown', 'unstable'].includes(pr.mergeable_state)) {
     log.log(`${tag}: skip (mergeable_state=${pr.mergeable_state})`);
     return;
   }
