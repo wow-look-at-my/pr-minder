@@ -9,7 +9,7 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
   const prNum = p.pull_request?.number;
   log.log(`event=${event} action=${action} repo=${repo} pr=${prNum}`);
 
-  if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'synchronize'].includes(action)) {
+  if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'unlabeled', 'synchronize'].includes(action)) {
     return onPR(p, env, log);
   }
   // Webhook payload uses lowercase state; REST API uses uppercase — different conventions.
