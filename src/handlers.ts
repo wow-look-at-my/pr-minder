@@ -31,14 +31,6 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
     log.log(`${tag}: skip (draft)`);
     return;
   }
-  // GitHub returns one priority-ordered mergeable_state. A PR that is behind AND blocked-by-review
-  // reports 'blocked', masking the behind-ness. 'unknown' and 'unstable' can appear in the webhook
-  // payload before GitHub finishes the async mergeability compute. Treat these as "maybe behind" —
-  // updateBranch returns 422 if not.
-  if (!['behind', 'blocked', 'unknown', 'unstable'].includes(pr.mergeable_state)) {
-    log.log(`${tag}: skip (mergeable_state=${pr.mergeable_state})`);
-    return;
-  }
 
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
   const [owner, name] = repo.split('/');
@@ -51,7 +43,10 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
     return;
   }
 
-  log.log(`${tag}: updateBranch`);
+  // updateBranch is idempotent via 422, so we call it regardless of mergeable_state.
+  // Webhook payloads frequently carry stale values ('unknown', 'unstable', or 'blocked'
+  // masking 'behind') before GitHub finishes its async mergeability compute.
+  log.log(`${tag}: updateBranch (mergeable_state=${pr.mergeable_state})`);
   await updateBranch(repo, pr.number, token, log);
   log.log(`${tag}: updateBranch ok`);
 }
