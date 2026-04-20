@@ -1,6 +1,7 @@
 // MIT
 // GitHub App must subscribe to: pull_request, pull_request_review, push
 import { handle } from './handlers';
+import { GhError } from './github';
 import { Logger } from './logger';
 
 export interface Env {
@@ -23,12 +24,14 @@ export default {
     const payload = JSON.parse(body);
 
     const log = new Logger();
+    let status = 200;
     try {
       await handle(event, payload, env, log);
     } catch (e) {
       log.log(`error: ${(e as Error).stack ?? (e as Error).message}`);
+      status = e instanceof GhError ? e.status : 500;
     }
-    return new Response(log.toString() || 'ok', { headers: { 'content-type': 'text/plain' } });
+    return new Response(log.toString() || 'ok', { status, headers: { 'content-type': 'text/plain' } });
   },
 };
 

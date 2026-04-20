@@ -1,5 +1,12 @@
 import type { Logger } from './logger';
 
+export class GhError extends Error {
+  constructor(public status: number, public body: string) {
+    super(`${status}: ${body}`);
+    this.name = 'GhError';
+  }
+}
+
 export async function gh(path: string, token: string, log: Logger) {
   const r = await fetch(`https://api.github.com${path}`, { headers: ghHeaders(token) });
   if (!r.ok && r.status !== 404) log.log(`gh ${path}: ${r.status}`);
@@ -28,7 +35,7 @@ export async function installToken(installId: number, appId: string, privateKey:
   if (!r.ok) {
     const body = await r.text();
     log.log(`installToken id=${installId}: ${r.status} ${body}`);
-    throw new Error(`token: ${r.status} ${body}`);
+    throw new GhError(r.status, body);
   }
   return ((await r.json()) as any).token;
 }
@@ -44,7 +51,7 @@ export async function updateBranch(repo: string, num: number, token: string, log
   const body = await r.text();
   log.log(`updateBranch ${repo}#${num}: ${r.status} ${body}`);
   if (r.status === 422 && /not behind|up.?to.?date|merge commit/i.test(body)) return;
-  throw new Error(`${r.status}: ${body}`);
+  throw new GhError(r.status, body);
 }
 
 export async function fetchApprovers(repo: string, num: number, token: string, log: Logger): Promise<Set<string>> {
