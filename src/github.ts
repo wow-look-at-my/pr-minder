@@ -54,6 +54,22 @@ export async function updateBranch(repo: string, num: number, token: string, log
   throw new GhError(r.status, body);
 }
 
+export async function ensureLabel(repo: string, name: string, color: string, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/labels`, {
+    method: 'POST',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ name, color }),
+  });
+  if (r.status === 201) {
+    log.log(`createLabel ${repo} "${name}" #${color}`);
+    return;
+  }
+  // 422 with "already_exists" is the steady state — label is present, nothing to do.
+  if (r.status === 422) return;
+  const body = await r.text();
+  log.log(`createLabel ${repo} "${name}": ${r.status} ${body}`);
+}
+
 export async function fetchApprovers(repo: string, num: number, token: string, log: Logger): Promise<Set<string>> {
   const r = await gh(`/repos/${repo}/pulls/${num}/reviews?per_page=100`, token, log);
   if (!r.ok) return new Set();
