@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { installToken, updateBranch, fetchApprovers, gh } from './github';
+import { ensureLabel, installToken, updateBranch, fetchApprovers, gh } from './github';
 import type { Logger } from './logger';
 
 export async function handle(event: string | null, p: any, env: Env, log: Logger): Promise<void> {
@@ -38,6 +38,7 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   log.log(`${tag}: config enabled=${config.enabled} triggers=${config.triggers.length}`);
 
   if (!config.enabled) return;
+  await ensureTriggerLabels(repo, config, token, log);
   if (!(await prQualifies(pr, repo, config, token, log))) {
     log.log(`${tag}: skip (no trigger matched; labels=${JSON.stringify(pr.labels?.map((l: any) => l.name))})`);
     return;
@@ -58,6 +59,7 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   const config = await loadConfig(owner, name, token, log);
   log.log(`${repo} push: config enabled=${config.enabled} triggers=${config.triggers.length}`);
   if (!config.enabled) return;
+  await ensureTriggerLabels(repo, config, token, log);
 
   const r = await gh(`/repos/${owner}/${name}/pulls?state=open&per_page=100`, token, log);
   const prs: any[] = await r.json();
@@ -76,6 +78,21 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
       log.log(`${tag}: updateBranch ok`);
     } catch (e) {
       log.log(`${tag}: updateBranch failed: ${(e as Error).message}`);
+    }
+  }
+}
+
+async function ensureTriggerLabels(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  if (!config.labels.autocreate) return;
+  const names = new Set<string>();
+  for (const t of config.triggers) {
+    if (t.label) names.add(t.label);
+  }
+  for (const name of names) {
+    try {
+      await ensureLabel(repo, name, config.labels.color, token, log);
+    } catch (e) {
+      log.log(`ensureLabel "${name}" failed: ${(e as Error).message}`);
     }
   }
 }

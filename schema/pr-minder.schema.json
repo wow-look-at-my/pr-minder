@@ -52,6 +52,24 @@
           "description": "List of trigger conditions. Any passing condition fires a branch update (OR). Keys within a condition are ANDed.",
           "type": "array",
           "items": { "$ref": "#/$defs/triggerCondition" }
+        },
+        "labels": {
+          "description": "Options controlling labels referenced by 'label' triggers.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "autocreate": {
+              "description": "If true, any label named in a 'label' trigger is created in the repo if missing.",
+              "type": "boolean",
+              "default": false
+            },
+            "color": {
+              "description": "Hex color for autocreated labels (with or without leading '#').",
+              "type": "string",
+              "pattern": "^#?[0-9a-fA-F]{6}$",
+              "default": "00FF00"
+            }
+          }
         }
       }
     },
