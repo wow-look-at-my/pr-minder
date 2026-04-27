@@ -3,11 +3,22 @@ import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config
 import { ensureLabel, installToken, updateBranch, fetchApprovers, listInstallationRepos, gh } from './github';
 import type { Logger } from './logger';
 
+// Per-repo throttle for opportunistic label checks. Module-scope cache lives
+// for the life of the isolate; a cold start just re-checks once, no harm.
+const labelCheckedAt = new Map<string, number>();
+const LABEL_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+
 export async function handle(event: string | null, p: any, env: Env, log: Logger): Promise<void> {
   const repo = p.repository?.full_name;
   const action = p.action;
   const prNum = p.pull_request?.number;
   log.log(`event=${event} action=${action} repo=${repo} pr=${prNum}`);
+
+  // Opportunistic label check on every event for the source repo, throttled per-repo.
+  // Handlers below that already create labels (installation sweeps) bypass this.
+  if (repo && p.installation?.id) {
+    await maybeEnsureLabelsForRepo(repo, p.installation.id, env, log);
+  }
 
   if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'unlabeled', 'synchronize'].includes(action)) {
     return onPR(p, env, log);
@@ -28,6 +39,27 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
   log.log(`skip: no handler matched (event=${event} action=${action})`);
 }
 
+async function maybeEnsureLabelsForRepo(
+  fullName: string,
+  installationId: number,
+  env: Env,
+  log: Logger,
+): Promise<void> {
+  const now = Date.now();
+  const last = labelCheckedAt.get(fullName);
+  if (last !== undefined && now - last < LABEL_CHECK_INTERVAL_MS) return;
+  labelCheckedAt.set(fullName, now);
+  try {
+    const token = await installToken(installationId, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+    const [owner, name] = fullName.split('/');
+    const config = await loadConfig(owner, name, token, log);
+    if (!config.enabled) return;
+    await ensureTriggerLabels(fullName, config, token, log);
+  } catch (e) {
+    log.log(`maybeEnsureLabels: ${fullName}: ${(e as Error).message}`);
+  }
+}
+
 async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   const pr = p.pull_request;
   const repo = p.repository.full_name;
@@ -44,7 +76,6 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   log.log(`${tag}: config enabled=${config.enabled} triggers=${config.triggers.length}`);
 
   if (!config.enabled) return;
-  await ensureTriggerLabels(repo, config, token, log);
   if (!(await prQualifies(pr, repo, config, token, log))) {
     log.log(`${tag}: skip (no trigger matched; labels=${JSON.stringify(pr.labels?.map((l: any) => l.name))})`);
     return;
@@ -65,7 +96,6 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   const config = await loadConfig(owner, name, token, log);
   log.log(`${repo} push: config enabled=${config.enabled} triggers=${config.triggers.length}`);
   if (!config.enabled) return;
-  await ensureTriggerLabels(repo, config, token, log);
 
   const r = await gh(`/repos/${owner}/${name}/pulls?state=open&per_page=100`, token, log);
   const prs: any[] = await r.json();
@@ -98,6 +128,7 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
       const config = await loadConfig(owner, name, token, log);
       if (!config.enabled) continue;
       await ensureTriggerLabels(fullName, config, token, log);
+      labelCheckedAt.set(fullName, Date.now());
     } catch (e) {
       log.log(`installation: ${fullName}: ${(e as Error).message}`);
     }
@@ -114,6 +145,7 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
       const config = await loadConfig(owner, name, token, log);
       if (!config.enabled) continue;
       await ensureTriggerLabels(repo.full_name, config, token, log);
+      labelCheckedAt.set(repo.full_name, Date.now());
     } catch (e) {
       log.log(`repos_added: ${repo.full_name}: ${(e as Error).message}`);
     }
