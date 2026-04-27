@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { ensureLabel, installToken, updateBranch, fetchApprovers, gh } from './github';
+import { ensureLabel, installToken, updateBranch, fetchApprovers, listInstallationRepos, gh } from './github';
 import type { Logger } from './logger';
 
 export async function handle(event: string | null, p: any, env: Env, log: Logger): Promise<void> {
@@ -18,6 +18,12 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
   }
   if (event === 'push' && p.ref === `refs/heads/${p.repository.default_branch}`) {
     return onPushToDefault(p, env, log);
+  }
+  if (event === 'installation' && (action === 'created' || action === 'new_permissions_accepted')) {
+    return onInstallation(p, env, log);
+  }
+  if (event === 'installation_repositories' && action === 'added') {
+    return onReposAdded(p, env, log);
   }
   log.log(`skip: no handler matched (event=${event} action=${action})`);
 }
@@ -78,6 +84,38 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
       log.log(`${tag}: updateBranch ok`);
     } catch (e) {
       log.log(`${tag}: updateBranch failed: ${(e as Error).message}`);
+    }
+  }
+}
+
+async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
+  const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  const repos = await listInstallationRepos(token, log);
+  log.log(`installation: sweeping ${repos.length} repos for label creation`);
+  for (const fullName of repos) {
+    const [owner, name] = fullName.split('/');
+    try {
+      const config = await loadConfig(owner, name, token, log);
+      if (!config.enabled) continue;
+      await ensureTriggerLabels(fullName, config, token, log);
+    } catch (e) {
+      log.log(`installation: ${fullName}: ${(e as Error).message}`);
+    }
+  }
+}
+
+async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
+  const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  const added: any[] = p.repositories_added ?? [];
+  log.log(`installation_repositories: ${added.length} repos added`);
+  for (const repo of added) {
+    const [owner, name] = repo.full_name.split('/');
+    try {
+      const config = await loadConfig(owner, name, token, log);
+      if (!config.enabled) continue;
+      await ensureTriggerLabels(repo.full_name, config, token, log);
+    } catch (e) {
+      log.log(`repos_added: ${repo.full_name}: ${(e as Error).message}`);
     }
   }
 }

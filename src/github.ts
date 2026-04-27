@@ -70,6 +70,22 @@ export async function ensureLabel(repo: string, name: string, color: string, tok
   log.log(`createLabel ${repo} "${name}": ${r.status} ${body}`);
 }
 
+export async function listInstallationRepos(token: string, log: Logger): Promise<string[]> {
+  const repos: string[] = [];
+  let page = 1;
+  for (;;) {
+    const r = await gh(`/installation/repositories?per_page=100&page=${page}`, token, log);
+    if (!r.ok) break;
+    const data: any = await r.json();
+    for (const repo of data.repositories) {
+      repos.push(repo.full_name);
+    }
+    if (repos.length >= data.total_count) break;
+    page++;
+  }
+  return repos;
+}
+
 export async function fetchApprovers(repo: string, num: number, token: string, log: Logger): Promise<Set<string>> {
   const r = await gh(`/repos/${repo}/pulls/${num}/reviews?per_page=100`, token, log);
   if (!r.ok) return new Set();

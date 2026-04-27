@@ -1,5 +1,6 @@
 // MIT
 // GitHub App must subscribe to: pull_request, pull_request_review, push
+// Also handles: installation, installation_repositories (auto-delivered to all apps)
 import { handle } from './handlers';
 import { GhError } from './github';
 import { Logger } from './logger';
