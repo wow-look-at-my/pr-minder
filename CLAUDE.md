@@ -7,7 +7,7 @@ Cloudflare Worker (TypeScript) that acts as a GitHub App webhook handler for kee
 ```
 src/
   worker.ts     Entry point: Cloudflare Worker fetch handler + webhook HMAC verification
-  handlers.ts   Event dispatch: handle(), onPR(), onPushToDefault(), prQualifies()
+  handlers.ts   Event dispatch: handle(), onPR(), onPushToDefault(), onInstallation(), onReposAdded(), prQualifies()
   config.ts     Config loading: loadConfig(), PrMinderConfig type
   github.ts     GitHub API: auth (JWT/install token), REST helpers
 schema/
@@ -42,5 +42,5 @@ Set via `wrangler secret put <NAME>`:
 
 - `update-branch` returns 422 when already up to date — this is not an error (handled in `github.ts`)
 - `pull_request_review` webhook sends `review.state` lowercase; the reviews REST API returns uppercase `APPROVED` — both cases are handled
-- GitHub App must subscribe to `pull_request`, `pull_request_review`, and `push` events
+- GitHub App must subscribe to `pull_request`, `pull_request_review`, and `push` events; `installation` and `installation_repositories` are auto-delivered
 - JWT validity window is `iat - 60s` to `exp + 540s` (GitHub allows up to 10 min; we use 9)

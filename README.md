@@ -4,9 +4,10 @@ A Cloudflare Worker GitHub App that keeps pull requests up to date with their ba
 
 ## How it works
 
-1. A GitHub App webhook fires on `pull_request`, `pull_request_review`, or `push` events
+1. A GitHub App webhook fires on `pull_request`, `pull_request_review`, `push`, `installation`, or `installation_repositories` events
 2. The worker verifies the signature, mints an installation token, and calls GitHub's [update-branch API](https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request-branch)
-3. No state, no DB, no cron — purely event-driven
+3. On `installation.created` or `installation.new_permissions_accepted`, sweeps all repos to create any configured labels
+4. No state, no DB, no cron -- purely event-driven
 
 A PR is updated when **any** configured trigger is satisfied:
 
@@ -24,10 +25,13 @@ Create a GitHub App with:
 
 **Permissions:**
 - Contents: Read & write
+- Issues: Read & write (for label creation)
 - Pull requests: Read & write
 - Metadata: Read (required)
 
 **Subscribe to events:** `pull_request`, `pull_request_review`, `push`
+
+`installation` and `installation_repositories` events are delivered automatically to all GitHub Apps.
 
 **Installation:** All repositories (or selected repos as needed)
 
