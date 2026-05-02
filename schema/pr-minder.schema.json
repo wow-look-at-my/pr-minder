@@ -3,24 +3,27 @@
   "$id": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
   "title": "pr-minder config",
   "description": "Configuration for the pr-minder GitHub App. Supports JSONC (comments allowed). Place at .github/pr-minder.jsonc in any repo, or at .github/config/pr-minder/pr-minder.jsonc in the org's .github repo (with optional per-repo overrides under 'repos').",
-  "$ref": "#/$defs/baseConfig",
+  "type": "object",
+  "additionalProperties": false,
   "properties": {
     "$schema": {
+      "description": "URL to this JSON Schema. Used by IDEs for validation and autocomplete.",
       "type": "string"
     },
+    "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
+    "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" },
     "repos": {
       "description": "Per-repo config overrides. Only meaningful in the org-level .github/config/pr-minder/pr-minder.jsonc; ignored in per-repo config files.",
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/repoConfig" }
     }
   },
-  "unevaluatedProperties": false,
   "$defs": {
     "triggerCondition": {
       "description": "A single trigger condition. All specified keys must match (AND). Multiple conditions in the triggers array are ORed.",
       "type": "object",
       "minProperties": 1,
-      "unevaluatedProperties": false,
+      "additionalProperties": false,
       "properties": {
         "label": {
           "description": "PR must have this label.",
@@ -80,17 +83,14 @@
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/labelOptions" }
     },
-    "baseConfig": {
+    "repoConfig": {
+      "description": "Per-repo overrides. Supports the same fields as the top-level config, except 'repos'.",
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
         "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" }
       }
-    },
-    "repoConfig": {
-      "description": "Per-repo overrides. Supports the same fields as the top-level config, except 'repos'.",
-      "$ref": "#/$defs/baseConfig",
-      "unevaluatedProperties": false
     }
   }
 }
