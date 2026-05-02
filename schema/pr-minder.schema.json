@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
   "title": "pr-minder config",
-  "description": "Configuration for the pr-minder GitHub App. Supports JSONC (comments allowed). Place at .github/pr-minder.json in any repo, or at pr-minder.json in the org's .github repo (with optional per-repo overrides under 'repos').",
+  "description": "Configuration for the pr-minder GitHub App. Supports JSONC (comments allowed). Place at .github/pr-minder.jsonc in any repo, or at .github/config/pr-minder/pr-minder.jsonc in the org's .github repo (with optional per-repo overrides under 'repos').",
   "$ref": "#/$defs/baseConfig",
   "properties": {
     "$schema": {
       "type": "string"
     },
     "repos": {
-      "description": "Per-repo config overrides. Only meaningful in the org-level .github/pr-minder.json; ignored in per-repo config files.",
+      "description": "Per-repo config overrides. Only meaningful in the org-level .github/config/pr-minder/pr-minder.jsonc; ignored in per-repo config files.",
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/repoConfig" }
     }
@@ -40,37 +40,51 @@
         }
       }
     },
-    "baseConfig": {
+    "autoUpdatePr": {
+      "description": "Auto-update settings: keep PR branches in sync with their base branch when conditions are met.",
       "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "description": "Disable pr-minder entirely for this repo.",
-          "type": "boolean",
-          "default": true
-        },
         "triggers": {
           "description": "List of trigger conditions. Any passing condition fires a branch update (OR). Keys within a condition are ANDed.",
           "type": "array",
           "items": { "$ref": "#/$defs/triggerCondition" }
-        },
-        "labels": {
-          "description": "Options controlling labels referenced by 'label' triggers.",
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "autocreate": {
-              "description": "If true, any label named in a 'label' trigger is created in the repo if missing.",
-              "type": "boolean",
-              "default": false
-            },
-            "color": {
-              "description": "Hex color for autocreated labels (with or without leading '#').",
-              "type": "string",
-              "pattern": "^#?[0-9a-fA-F]{6}$",
-              "default": "00FF00"
-            }
-          }
         }
+      }
+    },
+    "labelOptions": {
+      "description": "Settings for a single label name.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_add": {
+          "description": "If 'on_pr_creation', automatically apply this label to PRs when they are opened. 'false' or omitted disables auto-add.",
+          "enum": ["on_pr_creation", false],
+          "default": false
+        },
+        "create_label_if_missing_in_repo": {
+          "description": "If true, create this label in the repo (with the configured color) if it does not already exist.",
+          "type": "boolean",
+          "default": false
+        },
+        "color": {
+          "description": "Hex color used when creating this label, with or without a leading '#'.",
+          "type": "string",
+          "pattern": "^#?[0-9a-fA-F]{6}$",
+          "default": "00FF00"
+        }
+      }
+    },
+    "autoLabelPr": {
+      "description": "Map of label name to its settings.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/labelOptions" }
+    },
+    "baseConfig": {
+      "type": "object",
+      "properties": {
+        "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
+        "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" }
       }
     },
     "repoConfig": {

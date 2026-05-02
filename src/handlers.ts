@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { ensureLabel, installToken, updateBranch, fetchApprovers, listInstallationRepos, gh } from './github';
+import { addLabelsToPr, ensureLabel, installToken, updateBranch, fetchApprovers, listInstallationRepos, gh } from './github';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -53,8 +53,7 @@ async function maybeEnsureLabelsForRepo(
     const token = await installToken(installationId, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
     const [owner, name] = fullName.split('/');
     const config = await loadConfig(owner, name, token, log);
-    if (!config.enabled) return;
-    await ensureTriggerLabels(fullName, config, token, log);
+    await createConfiguredLabels(fullName, config, token, log);
   } catch (e) {
     log.log(`maybeEnsureLabels: ${fullName}: ${(e as Error).message}`);
   }
@@ -64,6 +63,7 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   const pr = p.pull_request;
   const repo = p.repository.full_name;
   const tag = `${repo}#${pr.number}`;
+  const action = p.action;
 
   if (pr.draft) {
     log.log(`${tag}: skip (draft)`);
@@ -73,9 +73,13 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
   const [owner, name] = repo.split('/');
   const config = await loadConfig(owner, name, token, log);
-  log.log(`${tag}: config enabled=${config.enabled} triggers=${config.triggers.length}`);
+  log.log(`${tag}: triggers=${config.triggers.length} labels=${Object.keys(config.labels).length}`);
 
-  if (!config.enabled) return;
+  if (action === 'opened') {
+    await applyAutoAddLabels(repo, pr, config, token, log);
+  }
+
+  if (config.triggers.length === 0) return;
   if (!(await prQualifies(pr, repo, config, token, log))) {
     log.log(`${tag}: skip (no trigger matched; labels=${JSON.stringify(pr.labels?.map((l: any) => l.name))})`);
     return;
@@ -94,8 +98,8 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
   const [owner, name] = repo.split('/');
   const config = await loadConfig(owner, name, token, log);
-  log.log(`${repo} push: config enabled=${config.enabled} triggers=${config.triggers.length}`);
-  if (!config.enabled) return;
+  log.log(`${repo} push: triggers=${config.triggers.length}`);
+  if (config.triggers.length === 0) return;
 
   const r = await gh(`/repos/${owner}/${name}/pulls?state=open&per_page=100`, token, log);
   const prs: any[] = await r.json();
@@ -126,8 +130,7 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
     const [owner, name] = fullName.split('/');
     try {
       const config = await loadConfig(owner, name, token, log);
-      if (!config.enabled) continue;
-      await ensureTriggerLabels(fullName, config, token, log);
+      await createConfiguredLabels(fullName, config, token, log);
       labelCheckedAt.set(fullName, Date.now());
     } catch (e) {
       log.log(`installation: ${fullName}: ${(e as Error).message}`);
@@ -143,8 +146,7 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
     const [owner, name] = repo.full_name.split('/');
     try {
       const config = await loadConfig(owner, name, token, log);
-      if (!config.enabled) continue;
-      await ensureTriggerLabels(repo.full_name, config, token, log);
+      await createConfiguredLabels(repo.full_name, config, token, log);
       labelCheckedAt.set(repo.full_name, Date.now());
     } catch (e) {
       log.log(`repos_added: ${repo.full_name}: ${(e as Error).message}`);
@@ -152,18 +154,31 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
   }
 }
 
-async function ensureTriggerLabels(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
-  if (!config.labels.autocreate) return;
-  const names = new Set<string>();
-  for (const t of config.triggers) {
-    if (t.label) names.add(t.label);
-  }
-  for (const name of names) {
+async function createConfiguredLabels(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  for (const [name, opts] of Object.entries(config.labels)) {
+    if (!opts.create_label_if_missing_in_repo) continue;
     try {
-      await ensureLabel(repo, name, config.labels.color, token, log);
+      await ensureLabel(repo, name, opts.color, token, log);
     } catch (e) {
       log.log(`ensureLabel "${name}" failed: ${(e as Error).message}`);
     }
+  }
+}
+
+async function applyAutoAddLabels(repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  const existing = new Set<string>((pr.labels ?? []).map((l: any) => l.name));
+  const toAdd: string[] = [];
+  for (const [name, opts] of Object.entries(config.labels)) {
+    if (opts.auto_add === 'on_pr_creation' && !existing.has(name)) toAdd.push(name);
+  }
+  if (toAdd.length === 0) return;
+  try {
+    await addLabelsToPr(repo, pr.number, toAdd, token, log);
+    // GitHub will fire a separate `labeled` webhook, but reflect the change locally
+    // so the trigger evaluation in this same handler call sees the new labels.
+    for (const name of toAdd) pr.labels.push({ name });
+  } catch (e) {
+    log.log(`applyAutoAddLabels ${repo}#${pr.number} failed: ${(e as Error).message}`);
   }
 }
 

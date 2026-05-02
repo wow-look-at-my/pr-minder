@@ -11,7 +11,7 @@ src/
   config.ts     Config loading: loadConfig(), PrMinderConfig type
   github.ts     GitHub API: auth (JWT/install token), REST helpers
 schema/
-  pr-minder.schema.json   JSON Schema for .github/pr-minder.json config files
+  pr-minder.schema.json   JSON Schema for .github/pr-minder.jsonc config files
 wrangler.toml             Worker name, compat date, plain vars (AUTOMERGE_LABEL, GITHUB_APP_ID)
 ```
 
@@ -34,9 +34,17 @@ Set via `wrangler secret put <NAME>`:
 
 ## Config file loading order
 
-1. `{repo}/.github/pr-minder.json` — per-repo (highest priority)
-2. `{org}/.github` repo, `.github/config/pr-minder/pr-minder.json` → `repos.{repo}` field for per-repo overrides, top-level for org defaults
-3. No config found → all triggers disabled (opt-in design; nothing fires by default)
+1. `{repo}/.github/pr-minder.jsonc` — per-repo (highest priority)
+2. `{org}/.github` repo, `.github/config/pr-minder/pr-minder.jsonc` → `repos.{repo}` field for per-repo overrides, top-level for org defaults
+3. No config found → everything disabled (opt-in design; nothing fires by default)
+
+## Config shape
+
+- `auto_update_pr.triggers`: array of trigger conditions; any one passing fires `update-branch`. Keys within a condition are ANDed; conditions are ORed.
+- `auto_label_pr`: map of label name → `{ auto_add, create_label_if_missing_in_repo, color }`.
+  - `auto_add: "on_pr_creation"` adds the label to PRs when they are opened. Only `"on_pr_creation"` or `false`/unset are accepted today.
+  - `create_label_if_missing_in_repo: true` creates the label in the repo (with `color`) if it does not already exist.
+  - There is no top-level `enabled`; "disable" means absence of these sections (or, for an org-level override, an empty `auto_update_pr.triggers`).
 
 ## Key invariants
 
