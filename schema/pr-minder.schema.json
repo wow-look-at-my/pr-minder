@@ -53,6 +53,12 @@
           "type": "array",
           "items": { "$ref": "#/$defs/triggerCondition" }
         },
+        "default_labels": {
+          "description": "Labels to apply to PRs when they are opened. Combine with `labels.autocreate` to ensure the labels exist in the repo. Useful for tagging new PRs so they immediately match a `label` trigger.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
         "labels": {
           "description": "Options controlling labels referenced by 'label' triggers.",
           "type": "object",

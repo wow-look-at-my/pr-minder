@@ -21,6 +21,7 @@ export interface PrMinderConfig {
   enabled: boolean;
   triggers: TriggerCondition[]; // ORed; keys within each object are ANDed
   labels: LabelOptions;
+  default_labels: string[]; // applied to PRs on `opened`
 }
 
 const CONFIG_FILE = '.github/pr-minder.json';
@@ -29,7 +30,7 @@ export const DEFAULT_LABEL_COLOR = '00FF00';
 const defaultLabels = (): LabelOptions => ({ autocreate: false, color: DEFAULT_LABEL_COLOR });
 
 // Nothing fires without a config file — opt-in per repo or via org .github repo.
-const DISABLED: PrMinderConfig = { enabled: false, triggers: [], labels: defaultLabels() };
+const DISABLED: PrMinderConfig = { enabled: false, triggers: [], labels: defaultLabels(), default_labels: [] };
 
 export async function loadConfig(owner: string, repo: string, token: string, log: Logger): Promise<PrMinderConfig> {
   try {
@@ -54,11 +55,20 @@ export async function loadConfig(owner: string, repo: string, token: string, log
 }
 
 export function mergeConfig(top: any, override: any): PrMinderConfig {
-  const result: PrMinderConfig = { enabled: true, triggers: [], labels: defaultLabels() };
+  const result: PrMinderConfig = { enabled: true, triggers: [], labels: defaultLabels(), default_labels: [] };
   for (const src of [top, override]) {
     if (!src) continue;
     if (typeof src.enabled === 'boolean') result.enabled = src.enabled;
     if (Array.isArray(src.triggers)) result.triggers = src.triggers as TriggerCondition[];
+    if (Array.isArray(src.default_labels)) {
+      const seen = new Set<string>();
+      result.default_labels = [];
+      for (const s of src.default_labels) {
+        if (typeof s !== 'string' || seen.has(s)) continue;
+        seen.add(s);
+        result.default_labels.push(s);
+      }
+    }
     if (src.labels && typeof src.labels === 'object') {
       if (typeof src.labels.autocreate === 'boolean') result.labels.autocreate = src.labels.autocreate;
       if (typeof src.labels.color === 'string') result.labels.color = src.labels.color.replace(/^#/, '');

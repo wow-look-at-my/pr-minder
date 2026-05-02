@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mergeConfig, DEFAULT_LABEL_COLOR } from './config';
 
 const defaultLabels = { autocreate: false, color: DEFAULT_LABEL_COLOR };
-const noTriggers = { enabled: true, triggers: [], labels: defaultLabels };
+const noTriggers = { enabled: true, triggers: [], labels: defaultLabels, default_labels: [] };
 
 describe('mergeConfig', () => {
   it('returns enabled:true with empty triggers when top has no known fields', () => {
@@ -31,7 +31,43 @@ describe('mergeConfig', () => {
 
   it('null override is a no-op', () => {
     const cfg = mergeConfig({ triggers: [{ min_approvals: 2 }] }, null);
-    expect(cfg).toEqual({ enabled: true, triggers: [{ min_approvals: 2 }], labels: defaultLabels });
+    expect(cfg).toEqual({ enabled: true, triggers: [{ min_approvals: 2 }], labels: defaultLabels, default_labels: [] });
+  });
+
+  describe('default_labels', () => {
+    it('defaults to empty array', () => {
+      expect(mergeConfig({}, null).default_labels).toEqual([]);
+    });
+
+    it('reads default_labels from top-level', () => {
+      const cfg = mergeConfig({ default_labels: ['automerge', 'ready'] }, null);
+      expect(cfg.default_labels).toEqual(['automerge', 'ready']);
+    });
+
+    it('override replaces default_labels entirely', () => {
+      const cfg = mergeConfig({ default_labels: ['automerge'] }, { default_labels: ['ready'] });
+      expect(cfg.default_labels).toEqual(['ready']);
+    });
+
+    it('per-repo override can clear org-level default_labels with empty array', () => {
+      const cfg = mergeConfig({ default_labels: ['automerge'] }, { default_labels: [] });
+      expect(cfg.default_labels).toEqual([]);
+    });
+
+    it('drops non-string entries', () => {
+      const cfg = mergeConfig({ default_labels: ['automerge', 42, null, 'ready'] }, null);
+      expect(cfg.default_labels).toEqual(['automerge', 'ready']);
+    });
+
+    it('de-duplicates entries while preserving first-seen order', () => {
+      const cfg = mergeConfig({ default_labels: ['automerge', 'ready', 'automerge', 'ready'] }, null);
+      expect(cfg.default_labels).toEqual(['automerge', 'ready']);
+    });
+
+    it('ignores non-array default_labels', () => {
+      const cfg = mergeConfig({ default_labels: 'automerge' }, null);
+      expect(cfg.default_labels).toEqual([]);
+    });
   });
 
   describe('labels', () => {

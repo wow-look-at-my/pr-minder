@@ -70,8 +70,12 @@ Triggers are an array of condition objects. **Keys within one object are ANDed; 
     // OR if alice/bob approved AND there are at least 2 approvals
     { "approved_by": ["alice", "bob"], "min_approvals": 2 }
   ],
-  // Optional: auto-create any label named in a `label` trigger if it doesn't
-  // exist in the repo. Default: autocreate=false, color="00FF00".
+  // Optional: labels to apply to PRs when they are opened. Combine with
+  // `labels.autocreate` to make trigger labels apply to every new PR by default.
+  "default_labels": ["automerge"],
+  // Optional: auto-create any label named in a `label` trigger or in
+  // `default_labels` if it doesn't exist in the repo. Default: autocreate=false,
+  // color="00FF00".
   "labels": {
     "autocreate": true,
     "color": "#00FF00"
