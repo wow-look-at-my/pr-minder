@@ -43,6 +43,9 @@
     "baseConfig": {
       "type": "object",
       "properties": {
+        "$schema": {
+          "type": "string"
+        },
         "enabled": {
           "description": "Disable pr-minder entirely for this repo.",
           "type": "boolean",
