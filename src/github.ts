@@ -62,11 +62,14 @@ export async function addLabelsToPr(repo: string, num: number, labels: string[],
     body: JSON.stringify({ labels }),
   });
   if (r.ok) {
-    log.log(`addLabels ${repo}#${num}: ${labels.join(',')}`);
+    log.log(`addLabels ${repo}#${num}: [${labels.join(', ')}]`);
     return;
   }
   const body = await r.text();
   log.log(`addLabels ${repo}#${num}: ${r.status} ${body}`);
+  // 422 typically means the label doesn't exist in the repo — permanent error,
+  // retries won't help. Other failures (5xx, network) propagate so GitHub retries.
+  if (r.status === 422) return;
   throw new GhError(r.status, body);
 }
 
