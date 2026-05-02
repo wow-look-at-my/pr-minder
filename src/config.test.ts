@@ -59,6 +59,11 @@ describe('mergeConfig', () => {
       expect(cfg.default_labels).toEqual(['automerge', 'ready']);
     });
 
+    it('de-duplicates entries while preserving first-seen order', () => {
+      const cfg = mergeConfig({ default_labels: ['automerge', 'ready', 'automerge', 'ready'] }, null);
+      expect(cfg.default_labels).toEqual(['automerge', 'ready']);
+    });
+
     it('ignores non-array default_labels', () => {
       const cfg = mergeConfig({ default_labels: 'automerge' }, null);
       expect(cfg.default_labels).toEqual([]);

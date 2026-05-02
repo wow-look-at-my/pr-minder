@@ -67,6 +67,10 @@ export async function addLabels(repo: string, num: number, labels: string[], tok
   }
   const body = await r.text();
   log.log(`addLabels ${repo}#${num}: ${r.status} ${body}`);
+  // 422 typically means the label doesn't exist in the repo — permanent error,
+  // retries won't help. Other failures (5xx, network) propagate so GitHub retries.
+  if (r.status === 422) return;
+  throw new GhError(r.status, body);
 }
 
 export async function ensureLabel(repo: string, name: string, color: string, token: string, log: Logger): Promise<void> {

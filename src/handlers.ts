@@ -77,10 +77,17 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
 
   if (!config.enabled) return;
 
-  // Apply default labels on PR open. GitHub will fire a follow-up `labeled` event
-  // that re-runs onPR with the labels visible, so trigger evaluation happens then.
+  // Apply default labels on PR open. Only call the API for labels not already
+  // present, then mirror them into pr.labels so trigger evaluation below sees
+  // the post-add state. (GitHub fires a follow-up `labeled` event that will
+  // re-evaluate; that's redundant but harmless since updateBranch is idempotent.)
   if (p.action === 'opened' && config.default_labels.length > 0) {
-    await addLabels(repo, pr.number, config.default_labels, token, log);
+    const existing = new Set<string>((pr.labels ?? []).map((l: any) => l.name));
+    const toAdd = config.default_labels.filter((l) => !existing.has(l));
+    if (toAdd.length > 0) {
+      await addLabels(repo, pr.number, toAdd, token, log);
+      pr.labels = [...(pr.labels ?? []), ...toAdd.map((name) => ({ name }))];
+    }
   }
 
   if (!(await prQualifies(pr, repo, config, token, log))) {

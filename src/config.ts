@@ -61,7 +61,13 @@ export function mergeConfig(top: any, override: any): PrMinderConfig {
     if (typeof src.enabled === 'boolean') result.enabled = src.enabled;
     if (Array.isArray(src.triggers)) result.triggers = src.triggers as TriggerCondition[];
     if (Array.isArray(src.default_labels)) {
-      result.default_labels = src.default_labels.filter((s: any): s is string => typeof s === 'string');
+      const seen = new Set<string>();
+      result.default_labels = [];
+      for (const s of src.default_labels) {
+        if (typeof s !== 'string' || seen.has(s)) continue;
+        seen.add(s);
+        result.default_labels.push(s);
+      }
     }
     if (src.labels && typeof src.labels === 'object') {
       if (typeof src.labels.autocreate === 'boolean') result.labels.autocreate = src.labels.autocreate;
