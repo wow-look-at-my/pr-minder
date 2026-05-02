@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { ensureLabel, installToken, updateBranch, fetchApprovers, listInstallationRepos, gh } from './github';
+import { addLabels, ensureLabel, installToken, updateBranch, fetchApprovers, listInstallationRepos, gh } from './github';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -76,6 +76,13 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   log.log(`${tag}: config enabled=${config.enabled} triggers=${config.triggers.length}`);
 
   if (!config.enabled) return;
+
+  // Apply default labels on PR open. GitHub will fire a follow-up `labeled` event
+  // that re-runs onPR with the labels visible, so trigger evaluation happens then.
+  if (p.action === 'opened' && config.default_labels.length > 0) {
+    await addLabels(repo, pr.number, config.default_labels, token, log);
+  }
+
   if (!(await prQualifies(pr, repo, config, token, log))) {
     log.log(`${tag}: skip (no trigger matched; labels=${JSON.stringify(pr.labels?.map((l: any) => l.name))})`);
     return;
@@ -158,6 +165,7 @@ async function ensureTriggerLabels(repo: string, config: PrMinderConfig, token: 
   for (const t of config.triggers) {
     if (t.label) names.add(t.label);
   }
+  for (const l of config.default_labels) names.add(l);
   for (const name of names) {
     try {
       await ensureLabel(repo, name, config.labels.color, token, log);

@@ -54,6 +54,21 @@ export async function updateBranch(repo: string, num: number, token: string, log
   throw new GhError(r.status, body);
 }
 
+export async function addLabels(repo: string, num: number, labels: string[], token: string, log: Logger): Promise<void> {
+  if (labels.length === 0) return;
+  const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/labels`, {
+    method: 'POST',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ labels }),
+  });
+  if (r.ok) {
+    log.log(`addLabels ${repo}#${num}: [${labels.join(', ')}]`);
+    return;
+  }
+  const body = await r.text();
+  log.log(`addLabels ${repo}#${num}: ${r.status} ${body}`);
+}
+
 export async function ensureLabel(repo: string, name: string, color: string, token: string, log: Logger): Promise<void> {
   const r = await fetch(`https://api.github.com/repos/${repo}/labels`, {
     method: 'POST',
