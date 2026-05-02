@@ -12,37 +12,37 @@ export interface TriggerCondition {
   min_approvals?: number;
 }
 
+export type AutoAdd = 'on_pr_creation' | false;
+
 export interface LabelOptions {
-  autocreate: boolean;
+  auto_add: AutoAdd;
+  create_label_if_missing_in_repo: boolean;
   color: string; // 6-char hex, no leading '#'
 }
 
 export interface PrMinderConfig {
-  enabled: boolean;
   triggers: TriggerCondition[]; // ORed; keys within each object are ANDed
-  labels: LabelOptions;
-  default_labels: string[]; // applied to PRs on `opened`
+  labels: Record<string, LabelOptions>;
 }
 
-const CONFIG_FILE = '.github/pr-minder.json';
+const PER_REPO_CONFIG = '.github/pr-minder.jsonc';
+const ORG_CONFIG = '.github/config/pr-minder/pr-minder.jsonc';
 
 export const DEFAULT_LABEL_COLOR = '00FF00';
-const defaultLabels = (): LabelOptions => ({ autocreate: false, color: DEFAULT_LABEL_COLOR });
 
-// Nothing fires without a config file — opt-in per repo or via org .github repo.
-const DISABLED: PrMinderConfig = { enabled: false, triggers: [], labels: defaultLabels(), default_labels: [] };
+const DISABLED: PrMinderConfig = { triggers: [], labels: {} };
 
 export async function loadConfig(owner: string, repo: string, token: string, log: Logger): Promise<PrMinderConfig> {
   try {
-    const json = await fetchRepoFile(owner, repo, CONFIG_FILE, token, log);
+    const json = await fetchRepoFile(owner, repo, PER_REPO_CONFIG, token, log);
     if (json !== null) {
-      log.log(`config: per-repo ${owner}/${repo}/${CONFIG_FILE}`);
+      log.log(`config: per-repo ${owner}/${repo}/${PER_REPO_CONFIG}`);
       return mergeConfig(parseJsonc(json), null);
     }
   } catch (e) { log.log(`config: per-repo fetch failed: ${(e as Error).message}`); }
 
   try {
-    const json = await fetchRepoFile(owner, '.github', '.github/config/pr-minder/pr-minder.json', token, log);
+    const json = await fetchRepoFile(owner, '.github', ORG_CONFIG, token, log);
     if (json !== null) {
       log.log(`config: org-level ${owner}/.github`);
       const parsed = parseJsonc(json);
@@ -54,24 +54,32 @@ export async function loadConfig(owner: string, repo: string, token: string, log
   return DISABLED;
 }
 
+function defaultLabel(): LabelOptions {
+  return { auto_add: false, create_label_if_missing_in_repo: false, color: DEFAULT_LABEL_COLOR };
+}
+
 export function mergeConfig(top: any, override: any): PrMinderConfig {
-  const result: PrMinderConfig = { enabled: true, triggers: [], labels: defaultLabels(), default_labels: [] };
+  const result: PrMinderConfig = { triggers: [], labels: {} };
   for (const src of [top, override]) {
     if (!src) continue;
-    if (typeof src.enabled === 'boolean') result.enabled = src.enabled;
-    if (Array.isArray(src.triggers)) result.triggers = src.triggers as TriggerCondition[];
-    if (Array.isArray(src.default_labels)) {
-      const seen = new Set<string>();
-      result.default_labels = [];
-      for (const s of src.default_labels) {
-        if (typeof s !== 'string' || seen.has(s)) continue;
-        seen.add(s);
-        result.default_labels.push(s);
-      }
+    if (src.auto_update_pr && Array.isArray(src.auto_update_pr.triggers)) {
+      result.triggers = src.auto_update_pr.triggers as TriggerCondition[];
     }
-    if (src.labels && typeof src.labels === 'object') {
-      if (typeof src.labels.autocreate === 'boolean') result.labels.autocreate = src.labels.autocreate;
-      if (typeof src.labels.color === 'string') result.labels.color = src.labels.color.replace(/^#/, '');
+    if (src.auto_label_pr && typeof src.auto_label_pr === 'object') {
+      for (const [name, raw] of Object.entries(src.auto_label_pr as Record<string, any>)) {
+        if (!raw || typeof raw !== 'object') continue;
+        const opts = result.labels[name] ?? defaultLabel();
+        if (raw.auto_add === 'on_pr_creation' || raw.auto_add === false) {
+          opts.auto_add = raw.auto_add;
+        }
+        if (typeof raw.create_label_if_missing_in_repo === 'boolean') {
+          opts.create_label_if_missing_in_repo = raw.create_label_if_missing_in_repo;
+        }
+        if (typeof raw.color === 'string') {
+          opts.color = raw.color.replace(/^#/, '');
+        }
+        result.labels[name] = opts;
+      }
     }
   }
   return result;

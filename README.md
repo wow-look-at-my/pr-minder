@@ -54,52 +54,60 @@ npm run deploy
 
 ## Configuration
 
-Per-repo config at `.github/pr-minder.json` overrides the org-level config at `.github/config/pr-minder/pr-minder.json` in the org's `.github` repo. **If no config file is found, all triggers are disabled** — pr-minder is opt-in.
+Per-repo config at `.github/pr-minder.jsonc` overrides the org-level config at `.github/config/pr-minder/pr-minder.jsonc` in the org's `.github` repo. **If no config file is found, all behavior is disabled** — pr-minder is opt-in.
 
 Config files are **JSONC** — `//` and `/* */` comments are supported.
 
-Triggers are an array of condition objects. **Keys within one object are ANDed; multiple objects are ORed.**
+Top-level sections:
 
-**Per-repo** (`.github/pr-minder.json`):
+- `auto_update_pr.triggers` — array of condition objects. Keys within one object are ANDed; multiple objects are ORed.
+- `auto_label_pr` — map of label name to per-label settings.
+
+**Per-repo** (`.github/pr-minder.jsonc`):
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
-  "triggers": [
-    // fire if labeled "automerge"
-    { "label": "automerge" },
-    // OR if alice/bob approved AND there are at least 2 approvals
-    { "approved_by": ["alice", "bob"], "min_approvals": 2 }
-  ],
-  // Optional: labels to apply to PRs when they are opened. Combine with
-  // `labels.autocreate` to make trigger labels apply to every new PR by default.
-  "default_labels": ["automerge"],
-  // Optional: auto-create any label named in a `label` trigger or in
-  // `default_labels` if it doesn't exist in the repo. Default: autocreate=false,
-  // color="00FF00".
-  "labels": {
-    "autocreate": true,
-    "color": "#00FF00"
-  }
-}
-```
-
-**Org-level** (in the `{org}/.github` repo, at `.github/config/pr-minder/pr-minder.json`) with per-repo overrides:
-```jsonc
-{
-  "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
-  "triggers": [
-    { "label": "automerge" }
-  ],
-  "repos": {
-    "special-repo": {
-      "triggers": [{ "label": "ready-to-merge" }]
-    },
-    "opt-out-repo": {
-      "enabled": false
+  "auto_update_pr": {
+    "triggers": [
+      // fire if labeled "automerge"
+      { "label": "automerge" },
+      // OR if alice/bob approved AND there are at least 2 approvals
+      { "approved_by": ["alice", "bob"], "min_approvals": 2 }
+    ]
+  },
+  "auto_label_pr": {
+    "automerge": {
+      // Currently only "on_pr_creation" or false/unset.
+      "auto_add": "on_pr_creation",
+      "create_label_if_missing_in_repo": true,
+      "color": "00ff00"
     }
   }
 }
 ```
+
+**Org-level** (in the `{org}/.github` repo, at `.github/config/pr-minder/pr-minder.jsonc`) with per-repo overrides:
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
+  "auto_update_pr": {
+    "triggers": [{ "label": "automerge" }]
+  },
+  "repos": {
+    "special-repo": {
+      "auto_update_pr": {
+        "triggers": [{ "label": "ready-to-merge" }]
+      }
+    },
+    "opt-out-repo": {
+      // Override with empty triggers to disable updates for this repo.
+      "auto_update_pr": { "triggers": [] }
+    }
+  }
+}
+```
+
+In overrides, `auto_update_pr` replaces the parent's `auto_update_pr` entirely. `auto_label_pr` is merged per-label.
 
 The JSON Schema at [`schema/pr-minder.schema.json`](schema/pr-minder.schema.json) provides IDE validation and autocomplete when referenced via `$schema`.
 

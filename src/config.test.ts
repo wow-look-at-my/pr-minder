@@ -1,104 +1,119 @@
 import { describe, it, expect } from 'vitest';
 import { mergeConfig, DEFAULT_LABEL_COLOR } from './config';
 
-const defaultLabels = { autocreate: false, color: DEFAULT_LABEL_COLOR };
-const noTriggers = { enabled: true, triggers: [], labels: defaultLabels, default_labels: [] };
+const empty = { triggers: [], labels: {} };
 
 describe('mergeConfig', () => {
-  it('returns enabled:true with empty triggers when top has no known fields', () => {
-    expect(mergeConfig({}, null)).toEqual(noTriggers);
-  });
-
-  it('picks up triggers from top-level', () => {
-    const cfg = mergeConfig({ triggers: [{ label: 'automerge' }] }, null);
-    expect(cfg.triggers).toEqual([{ label: 'automerge' }]);
-    expect(cfg.enabled).toBe(true);
-  });
-
-  it('override replaces triggers entirely', () => {
-    const cfg = mergeConfig(
-      { triggers: [{ label: 'automerge' }] },
-      { triggers: [{ label: 'ready' }] },
-    );
-    expect(cfg.triggers).toEqual([{ label: 'ready' }]);
-  });
-
-  it('override can disable without touching triggers', () => {
-    const cfg = mergeConfig({ triggers: [{ label: 'automerge' }] }, { enabled: false });
-    expect(cfg.enabled).toBe(false);
-    expect(cfg.triggers).toEqual([{ label: 'automerge' }]);
+  it('returns empty triggers and labels when top has no known fields', () => {
+    expect(mergeConfig({}, null)).toEqual(empty);
   });
 
   it('null override is a no-op', () => {
-    const cfg = mergeConfig({ triggers: [{ min_approvals: 2 }] }, null);
-    expect(cfg).toEqual({ enabled: true, triggers: [{ min_approvals: 2 }], labels: defaultLabels, default_labels: [] });
+    const cfg = mergeConfig({ auto_update_pr: { triggers: [{ min_approvals: 2 }] } }, null);
+    expect(cfg).toEqual({ triggers: [{ min_approvals: 2 }], labels: {} });
   });
 
-  describe('default_labels', () => {
-    it('defaults to empty array', () => {
-      expect(mergeConfig({}, null).default_labels).toEqual([]);
+  describe('auto_update_pr', () => {
+    it('picks up triggers from top-level', () => {
+      const cfg = mergeConfig({ auto_update_pr: { triggers: [{ label: 'automerge' }] } }, null);
+      expect(cfg.triggers).toEqual([{ label: 'automerge' }]);
     });
 
-    it('reads default_labels from top-level', () => {
-      const cfg = mergeConfig({ default_labels: ['automerge', 'ready'] }, null);
-      expect(cfg.default_labels).toEqual(['automerge', 'ready']);
+    it('override replaces triggers entirely', () => {
+      const cfg = mergeConfig(
+        { auto_update_pr: { triggers: [{ label: 'automerge' }] } },
+        { auto_update_pr: { triggers: [{ label: 'ready' }] } },
+      );
+      expect(cfg.triggers).toEqual([{ label: 'ready' }]);
     });
 
-    it('override replaces default_labels entirely', () => {
-      const cfg = mergeConfig({ default_labels: ['automerge'] }, { default_labels: ['ready'] });
-      expect(cfg.default_labels).toEqual(['ready']);
+    it('override with empty triggers clears them (opt-out)', () => {
+      const cfg = mergeConfig(
+        { auto_update_pr: { triggers: [{ label: 'automerge' }] } },
+        { auto_update_pr: { triggers: [] } },
+      );
+      expect(cfg.triggers).toEqual([]);
     });
 
-    it('per-repo override can clear org-level default_labels with empty array', () => {
-      const cfg = mergeConfig({ default_labels: ['automerge'] }, { default_labels: [] });
-      expect(cfg.default_labels).toEqual([]);
-    });
-
-    it('drops non-string entries', () => {
-      const cfg = mergeConfig({ default_labels: ['automerge', 42, null, 'ready'] }, null);
-      expect(cfg.default_labels).toEqual(['automerge', 'ready']);
-    });
-
-    it('de-duplicates entries while preserving first-seen order', () => {
-      const cfg = mergeConfig({ default_labels: ['automerge', 'ready', 'automerge', 'ready'] }, null);
-      expect(cfg.default_labels).toEqual(['automerge', 'ready']);
-    });
-
-    it('ignores non-array default_labels', () => {
-      const cfg = mergeConfig({ default_labels: 'automerge' }, null);
-      expect(cfg.default_labels).toEqual([]);
+    it('override without auto_update_pr keeps top triggers', () => {
+      const cfg = mergeConfig(
+        { auto_update_pr: { triggers: [{ label: 'automerge' }] } },
+        { auto_label_pr: { foo: { color: '111111' } } },
+      );
+      expect(cfg.triggers).toEqual([{ label: 'automerge' }]);
     });
   });
 
-  describe('labels', () => {
-    it('defaults autocreate=false and color=00FF00', () => {
-      expect(mergeConfig({}, null).labels).toEqual({ autocreate: false, color: '00FF00' });
+  describe('auto_label_pr', () => {
+    it('parses a label with all fields', () => {
+      const cfg = mergeConfig({
+        auto_label_pr: {
+          automerge: {
+            auto_add: 'on_pr_creation',
+            create_label_if_missing_in_repo: true,
+            color: '#abcdef',
+          },
+        },
+      }, null);
+      expect(cfg.labels).toEqual({
+        automerge: { auto_add: 'on_pr_creation', create_label_if_missing_in_repo: true, color: 'abcdef' },
+      });
     });
 
-    it('reads autocreate and color from top-level', () => {
-      const cfg = mergeConfig({ labels: { autocreate: true, color: 'ABCDEF' } }, null);
-      expect(cfg.labels).toEqual({ autocreate: true, color: 'ABCDEF' });
+    it('strips a leading # from color', () => {
+      const cfg = mergeConfig({ auto_label_pr: { foo: { color: '#FF0000' } } }, null);
+      expect(cfg.labels.foo.color).toBe('FF0000');
     });
 
-    it('strips leading # from color', () => {
-      const cfg = mergeConfig({ labels: { color: '#FF0000' } }, null);
-      expect(cfg.labels.color).toBe('FF0000');
+    it('defaults: auto_add=false, create_label_if_missing_in_repo=false, color=00FF00', () => {
+      const cfg = mergeConfig({ auto_label_pr: { foo: {} } }, null);
+      expect(cfg.labels.foo).toEqual({
+        auto_add: false,
+        create_label_if_missing_in_repo: false,
+        color: DEFAULT_LABEL_COLOR,
+      });
     });
 
-    it('override partially updates labels (color only)', () => {
+    it('accepts auto_add: false explicitly', () => {
+      const cfg = mergeConfig({ auto_label_pr: { foo: { auto_add: false } } }, null);
+      expect(cfg.labels.foo.auto_add).toBe(false);
+    });
+
+    it('ignores invalid auto_add values', () => {
+      const cfg = mergeConfig({ auto_label_pr: { foo: { auto_add: 'whenever' } } }, null);
+      expect(cfg.labels.foo.auto_add).toBe(false);
+    });
+
+    it('override merges per-label (color only)', () => {
       const cfg = mergeConfig(
-        { labels: { autocreate: true, color: '00FF00' } },
-        { labels: { color: '123456' } },
+        { auto_label_pr: { automerge: { auto_add: 'on_pr_creation', color: 'aaaaaa' } } },
+        { auto_label_pr: { automerge: { color: 'bbbbbb' } } },
       );
-      expect(cfg.labels).toEqual({ autocreate: true, color: '123456' });
+      expect(cfg.labels.automerge).toEqual({
+        auto_add: 'on_pr_creation',
+        create_label_if_missing_in_repo: false,
+        color: 'bbbbbb',
+      });
     });
 
-    it('override partially updates labels (autocreate only)', () => {
+    it('override merges per-label (auto_add only)', () => {
       const cfg = mergeConfig(
-        { labels: { autocreate: true, color: 'ABCDEF' } },
-        { labels: { autocreate: false } },
+        { auto_label_pr: { automerge: { auto_add: 'on_pr_creation', color: 'aaaaaa' } } },
+        { auto_label_pr: { automerge: { auto_add: false } } },
       );
-      expect(cfg.labels).toEqual({ autocreate: false, color: 'ABCDEF' });
+      expect(cfg.labels.automerge).toEqual({
+        auto_add: false,
+        create_label_if_missing_in_repo: false,
+        color: 'aaaaaa',
+      });
+    });
+
+    it('override adds new labels alongside top ones', () => {
+      const cfg = mergeConfig(
+        { auto_label_pr: { automerge: { color: 'aaaaaa' } } },
+        { auto_label_pr: { ready: { color: 'bbbbbb' } } },
+      );
+      expect(Object.keys(cfg.labels).sort()).toEqual(['automerge', 'ready']);
     });
   });
 });

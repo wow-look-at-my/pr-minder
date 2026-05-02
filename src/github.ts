@@ -54,7 +54,7 @@ export async function updateBranch(repo: string, num: number, token: string, log
   throw new GhError(r.status, body);
 }
 
-export async function addLabels(repo: string, num: number, labels: string[], token: string, log: Logger): Promise<void> {
+export async function addLabelsToPr(repo: string, num: number, labels: string[], token: string, log: Logger): Promise<void> {
   if (labels.length === 0) return;
   const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/labels`, {
     method: 'POST',
