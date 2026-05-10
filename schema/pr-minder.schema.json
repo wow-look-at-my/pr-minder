@@ -88,6 +88,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "$schema": {
+          "type": "string"
+        },
         "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
         "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" }
       }
