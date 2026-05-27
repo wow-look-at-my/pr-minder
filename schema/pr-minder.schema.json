@@ -10,7 +10,6 @@
       "description": "URL to this JSON Schema. Used by IDEs for validation and autocomplete.",
       "type": "string"
     },
-    "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
     "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" },
     "repos": {
       "description": "Per-repo config overrides. Only meaningful in the org-level .github/config/pr-minder/pr-minder.jsonc; ignored in per-repo config files.",
@@ -19,42 +18,6 @@
     }
   },
   "$defs": {
-    "triggerCondition": {
-      "description": "A single trigger condition. All specified keys must match (AND). Multiple conditions in the triggers array are ORed.",
-      "type": "object",
-      "minProperties": 1,
-      "additionalProperties": false,
-      "properties": {
-        "label": {
-          "description": "PR must have this label.",
-          "type": "string"
-        },
-        "approved_by": {
-          "description": "PR must be approved by at least one of these GitHub usernames.",
-          "type": "array",
-          "items": { "type": "string" },
-          "uniqueItems": true,
-          "minItems": 1
-        },
-        "min_approvals": {
-          "description": "PR must have at least this many approvals from any users.",
-          "type": "integer",
-          "minimum": 1
-        }
-      }
-    },
-    "autoUpdatePr": {
-      "description": "Auto-update settings: keep PR branches in sync with their base branch when conditions are met.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "triggers": {
-          "description": "List of trigger conditions. Any passing condition fires a branch update (OR). Keys within a condition are ANDed.",
-          "type": "array",
-          "items": { "$ref": "#/$defs/triggerCondition" }
-        }
-      }
-    },
     "labelOptions": {
       "description": "Settings for a single label name.",
       "type": "object",
@@ -77,11 +40,11 @@
           "default": "00FF00"
         },
         "mode": {
-          "description": "'auto_merge': adding/removing this label enables/disables GitHub's native auto-merge, and toggling auto-merge via the GitHub UI adds/removes the label. 'auto_update': this label triggers automatic branch updates (equivalent to listing it in auto_update_pr.triggers).",
-          "enum": ["auto_merge", "auto_update"]
+          "description": "'auto_update': PR branch is kept in sync with its base whenever this label is present. 'auto_merge': adding/removing this label enables/disables GitHub's native auto-merge; toggling auto-merge via the GitHub UI adds/removes the label.",
+          "enum": ["auto_update", "auto_merge"]
         },
         "auto_merge_method": {
-          "description": "Merge method to use when enabling auto-merge. Only relevant when auto_merge is true.",
+          "description": "Merge method to use when enabling auto-merge. Only relevant when mode is 'auto_merge'.",
           "enum": ["merge", "squash", "rebase"],
           "default": "squash"
         }
@@ -100,7 +63,6 @@
         "$schema": {
           "type": "string"
         },
-        "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
         "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" }
       }
     }

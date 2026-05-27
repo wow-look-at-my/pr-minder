@@ -1,6 +1,6 @@
 import type { Env } from './worker';
-import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, gh } from './github';
+import { loadConfig, type PrMinderConfig } from './config';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, enableAutoMerge, disableAutoMerge, listInstallationRepos, gh } from './github';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -21,10 +21,6 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
   }
 
   if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'unlabeled', 'synchronize', 'auto_merge_enabled', 'auto_merge_disabled'].includes(action)) {
-    return onPR(p, env, log);
-  }
-  // Webhook payload uses lowercase state; REST API uses uppercase — different conventions.
-  if (event === 'pull_request_review' && action === 'submitted' && p.review?.state === 'approved') {
     return onPR(p, env, log);
   }
   if (event === 'push' && p.ref === `refs/heads/${p.repository.default_branch}`) {
@@ -73,7 +69,7 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
   const [owner, name] = repo.split('/');
   const config = await loadConfig(owner, name, token, log);
-  log.log(`${tag}: triggers=${config.triggers.length} labels=${Object.keys(config.labels).length}`);
+  log.log(`${tag}: labels=${Object.keys(config.labels).length}`);
 
   if (action === 'opened') {
     await applyAutoAddLabels(repo, pr, config, token, log);
@@ -102,9 +98,8 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
     await syncAutoMergeLabelDisabled(repo, pr, config, token, log);
   }
 
-  if (config.triggers.length === 0 && !Object.values(config.labels).some(l => l.mode === 'auto_update')) return;
-  if (!(await prQualifies(pr, repo, config, token, log))) {
-    log.log(`${tag}: skip (no trigger matched; labels=${JSON.stringify(pr.labels?.map((l: any) => l.name))})`);
+  if (!prQualifies(pr, config)) {
+    log.log(`${tag}: skip (no auto_update label present; labels=${JSON.stringify(pr.labels?.map((l: any) => l.name))})`);
     return;
   }
 
@@ -121,8 +116,6 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
   const [owner, name] = repo.split('/');
   const config = await loadConfig(owner, name, token, log);
-  log.log(`${repo} push: triggers=${config.triggers.length}`);
-  if (config.triggers.length === 0 && !Object.values(config.labels).some(l => l.mode === 'auto_update')) return;
 
   const r = await gh(`/repos/${owner}/${name}/pulls?state=open&per_page=100`, token, log);
   const prs: any[] = await r.json();
@@ -131,8 +124,8 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   for (const pr of prs) {
     const tag = `${repo}#${pr.number}`;
     if (pr.draft) { log.log(`${tag}: skip (draft)`); continue; }
-    if (!(await prQualifies(pr, repo, config, token, log))) {
-      log.log(`${tag}: skip (no trigger matched)`);
+    if (!prQualifies(pr, config)) {
+      log.log(`${tag}: skip (no auto_update label present)`);
       continue;
     }
     try {
@@ -226,32 +219,8 @@ async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinde
   }
 }
 
-async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<boolean> {
-  let approvers: Set<string> | null = null;
-  const getApprovers = async () => {
-    if (approvers === null) approvers = await fetchApprovers(repo, pr.number, token, log);
-    return approvers;
-  };
-
-  for (const condition of config.triggers) {
-    if (await conditionMet(condition, pr, getApprovers)) return true;
-  }
-  for (const [labelName, opts] of Object.entries(config.labels)) {
-    if (opts.mode === 'auto_update' && pr.labels.some((l: any) => l.name === labelName)) return true;
-  }
-  return false;
-}
-
-export async function conditionMet(
-  c: TriggerCondition,
-  pr: any,
-  getApprovers: () => Promise<Set<string>>,
-): Promise<boolean> {
-  if (c.label !== undefined && !pr.labels.some((l: any) => l.name === c.label)) return false;
-  if (c.approved_by !== undefined || c.min_approvals !== undefined) {
-    const approvers = await getApprovers();
-    if (c.approved_by !== undefined && !c.approved_by.some((u) => approvers.has(u))) return false;
-    if (c.min_approvals !== undefined && approvers.size < c.min_approvals) return false;
-  }
-  return true;
+function prQualifies(pr: any, config: PrMinderConfig): boolean {
+  return Object.entries(config.labels).some(
+    ([name, opts]) => opts.mode === 'auto_update' && pr.labels.some((l: any) => l.name === name),
+  );
 }
