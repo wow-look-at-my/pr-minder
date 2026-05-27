@@ -75,6 +75,16 @@
           "type": "string",
           "pattern": "^#?[0-9a-fA-F]{6}$",
           "default": "00FF00"
+        },
+        "auto_merge": {
+          "description": "If true, adding this label enables GitHub's native auto-merge on the PR, and removing it disables auto-merge. Conversely, enabling/disabling auto-merge via the GitHub UI will add/remove this label.",
+          "type": "boolean",
+          "default": false
+        },
+        "auto_merge_method": {
+          "description": "Merge method to use when enabling auto-merge. Only relevant when auto_merge is true.",
+          "enum": ["merge", "squash", "rebase"],
+          "default": "squash"
         }
       }
     },

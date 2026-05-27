@@ -56,7 +56,7 @@ describe('mergeConfig', () => {
         },
       }, null);
       expect(cfg.labels).toEqual({
-        automerge: { auto_add: 'on_pr_creation', create_label_if_missing_in_repo: true, color: 'abcdef' },
+        automerge: { auto_add: 'on_pr_creation', create_label_if_missing_in_repo: true, color: 'abcdef', auto_merge: false, auto_merge_method: 'squash' },
       });
     });
 
@@ -65,12 +65,14 @@ describe('mergeConfig', () => {
       expect(cfg.labels.foo.color).toBe('FF0000');
     });
 
-    it('defaults: auto_add=false, create_label_if_missing_in_repo=false, color=00FF00', () => {
+    it('defaults: auto_add=false, create_label_if_missing_in_repo=false, color=00FF00, auto_merge=false, auto_merge_method=squash', () => {
       const cfg = mergeConfig({ auto_label_pr: { foo: {} } }, null);
       expect(cfg.labels.foo).toEqual({
         auto_add: false,
         create_label_if_missing_in_repo: false,
         color: DEFAULT_LABEL_COLOR,
+        auto_merge: false,
+        auto_merge_method: 'squash',
       });
     });
 
@@ -93,6 +95,8 @@ describe('mergeConfig', () => {
         auto_add: 'on_pr_creation',
         create_label_if_missing_in_repo: false,
         color: 'bbbbbb',
+        auto_merge: false,
+        auto_merge_method: 'squash',
       });
     });
 
@@ -105,7 +109,24 @@ describe('mergeConfig', () => {
         auto_add: false,
         create_label_if_missing_in_repo: false,
         color: 'aaaaaa',
+        auto_merge: false,
+        auto_merge_method: 'squash',
       });
+    });
+
+    it('parses auto_merge and auto_merge_method', () => {
+      const cfg = mergeConfig({
+        auto_label_pr: {
+          'auto-pr-merge': { auto_merge: true, auto_merge_method: 'rebase', create_label_if_missing_in_repo: true },
+        },
+      }, null);
+      expect(cfg.labels['auto-pr-merge'].auto_merge).toBe(true);
+      expect(cfg.labels['auto-pr-merge'].auto_merge_method).toBe('rebase');
+    });
+
+    it('ignores invalid auto_merge_method values', () => {
+      const cfg = mergeConfig({ auto_label_pr: { foo: { auto_merge_method: 'fast-forward' } } }, null);
+      expect(cfg.labels.foo.auto_merge_method).toBe('squash');
     });
 
     it('override adds new labels alongside top ones', () => {

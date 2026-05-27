@@ -18,7 +18,7 @@ export function ghHeaders(token: string): HeadersInit {
     authorization: `Bearer ${token}`,
     accept: 'application/vnd.github+json',
     'x-github-api-version': '2022-11-28',
-    'user-agent': 'automerge-worker',
+    'user-agent': 'pr-minder',
   };
 }
 
@@ -29,7 +29,7 @@ export async function installToken(installId: number, appId: string, privateKey:
     headers: {
       authorization: `Bearer ${jwt}`,
       accept: 'application/vnd.github+json',
-      'user-agent': 'automerge-worker',
+      'user-agent': 'pr-minder',
     },
   });
   if (!r.ok) {
@@ -103,6 +103,44 @@ export async function listInstallationRepos(token: string, log: Logger): Promise
     page++;
   }
   return repos;
+}
+
+export async function enableAutoMerge(repo: string, num: number, method: string, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}/automerge`, {
+    method: 'PUT',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ merge_method: method }),
+  });
+  if (r.ok) { log.log(`enableAutoMerge ${repo}#${num}: ok`); return; }
+  const body = await r.text();
+  log.log(`enableAutoMerge ${repo}#${num}: ${r.status} ${body}`);
+  // 403 = auto-merge not enabled in repo settings; 422 = validation (already enabled, etc.)
+  if (r.status === 403 || r.status === 422) return;
+  throw new GhError(r.status, body);
+}
+
+export async function disableAutoMerge(repo: string, num: number, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}/automerge`, {
+    method: 'DELETE',
+    headers: ghHeaders(token),
+  });
+  if (r.ok) { log.log(`disableAutoMerge ${repo}#${num}: ok`); return; }
+  const body = await r.text();
+  log.log(`disableAutoMerge ${repo}#${num}: ${r.status} ${body}`);
+  if (r.status === 404 || r.status === 422) return;
+  throw new GhError(r.status, body);
+}
+
+export async function removeLabelFromPr(repo: string, num: number, label: string, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/labels/${encodeURIComponent(label)}`, {
+    method: 'DELETE',
+    headers: ghHeaders(token),
+  });
+  if (r.ok) { log.log(`removeLabel ${repo}#${num}: "${label}"`); return; }
+  const body = await r.text();
+  log.log(`removeLabel ${repo}#${num} "${label}": ${r.status} ${body}`);
+  if (r.status === 404) return;
+  throw new GhError(r.status, body);
 }
 
 export async function fetchApprovers(repo: string, num: number, token: string, log: Logger): Promise<Set<string>> {

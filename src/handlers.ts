@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, ensureLabel, installToken, updateBranch, fetchApprovers, listInstallationRepos, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, gh } from './github';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -20,7 +20,7 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
     await maybeEnsureLabelsForRepo(repo, p.installation.id, env, log);
   }
 
-  if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'unlabeled', 'synchronize'].includes(action)) {
+  if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'unlabeled', 'synchronize', 'auto_merge_enabled', 'auto_merge_disabled'].includes(action)) {
     return onPR(p, env, log);
   }
   // Webhook payload uses lowercase state; REST API uses uppercase — different conventions.
@@ -77,6 +77,29 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
 
   if (action === 'opened') {
     await applyAutoAddLabels(repo, pr, config, token, log);
+  }
+
+  // Sync label ↔ GitHub native auto-merge (bidirectional).
+  // label added   → enable auto-merge; label removed  → disable auto-merge.
+  // auto_merge_enabled event → add label; auto_merge_disabled event → remove label.
+  if (action === 'labeled' || action === 'unlabeled') {
+    const changedLabel = p.label?.name as string | undefined;
+    const labelOpts = changedLabel ? config.labels[changedLabel] : undefined;
+    if (labelOpts?.auto_merge) {
+      if (action === 'labeled') {
+        log.log(`${tag}: enableAutoMerge (label added: "${changedLabel}")`);
+        await enableAutoMerge(repo, pr.number, labelOpts.auto_merge_method, token, log);
+      } else {
+        log.log(`${tag}: disableAutoMerge (label removed: "${changedLabel}")`);
+        await disableAutoMerge(repo, pr.number, token, log);
+      }
+    }
+  }
+  if (action === 'auto_merge_enabled') {
+    await syncAutoMergeLabelEnabled(repo, pr, config, token, log);
+  }
+  if (action === 'auto_merge_disabled') {
+    await syncAutoMergeLabelDisabled(repo, pr, config, token, log);
   }
 
   if (config.triggers.length === 0) return;
@@ -179,6 +202,27 @@ async function applyAutoAddLabels(repo: string, pr: any, config: PrMinderConfig,
     for (const name of toAdd) pr.labels.push({ name });
   } catch (e) {
     log.log(`applyAutoAddLabels ${repo}#${pr.number} failed: ${(e as Error).message}`);
+  }
+}
+
+async function syncAutoMergeLabelEnabled(repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  const tag = `${repo}#${pr.number}`;
+  for (const [labelName, opts] of Object.entries(config.labels)) {
+    if (!opts.auto_merge) continue;
+    if ((pr.labels ?? []).some((l: any) => l.name === labelName)) continue;
+    log.log(`${tag}: addLabel "${labelName}" (auto_merge_enabled)`);
+    await addLabelsToPr(repo, pr.number, [labelName], token, log);
+    pr.labels.push({ name: labelName });
+  }
+}
+
+async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  const tag = `${repo}#${pr.number}`;
+  for (const [labelName, opts] of Object.entries(config.labels)) {
+    if (!opts.auto_merge) continue;
+    if (!(pr.labels ?? []).some((l: any) => l.name === labelName)) continue;
+    log.log(`${tag}: removeLabel "${labelName}" (auto_merge_disabled)`);
+    await removeLabelFromPr(repo, pr.number, labelName, token, log);
   }
 }
 
