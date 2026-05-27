@@ -89,6 +89,18 @@ export async function ensureLabel(repo: string, name: string, color: string, tok
   log.log(`createLabel ${repo} "${name}": ${r.status} ${body}`);
 }
 
+export async function fetchApprovers(repo: string, num: number, token: string, log: Logger): Promise<Set<string>> {
+  const r = await gh(`/repos/${repo}/pulls/${num}/reviews?per_page=100`, token, log);
+  if (!r.ok) return new Set();
+  const reviews: any[] = await r.json();
+  // Latest non-pending review per user determines their standing vote
+  const latest = new Map<string, string>();
+  for (const rev of reviews) {
+    if (rev.state !== 'PENDING') latest.set(rev.user.login, rev.state);
+  }
+  return new Set([...latest].filter(([, state]) => state === 'APPROVED').map(([u]) => u));
+}
+
 export async function listInstallationRepos(token: string, log: Logger): Promise<string[]> {
   const repos: string[] = [];
   let page = 1;
@@ -141,18 +153,6 @@ export async function removeLabelFromPr(repo: string, num: number, label: string
   log.log(`removeLabel ${repo}#${num} "${label}": ${r.status} ${body}`);
   if (r.status === 404) return;
   throw new GhError(r.status, body);
-}
-
-export async function fetchApprovers(repo: string, num: number, token: string, log: Logger): Promise<Set<string>> {
-  const r = await gh(`/repos/${repo}/pulls/${num}/reviews?per_page=100`, token, log);
-  if (!r.ok) return new Set();
-  const reviews: any[] = await r.json();
-  // Latest non-pending review per user determines their standing vote
-  const latest = new Map<string, string>();
-  for (const rev of reviews) {
-    if (rev.state !== 'PENDING') latest.set(rev.user.login, rev.state);
-  }
-  return new Set([...latest].filter(([, state]) => state === 'APPROVED').map(([u]) => u));
 }
 
 async function appJWT(appId: string, pem: string): Promise<string> {

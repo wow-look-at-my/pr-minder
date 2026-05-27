@@ -2,12 +2,43 @@ import { describe, it, expect } from 'vitest';
 import { mergeConfig, DEFAULT_LABEL_COLOR } from './config';
 
 describe('mergeConfig', () => {
-  it('returns empty labels when top has no known fields', () => {
-    expect(mergeConfig({}, null)).toEqual({ labels: {} });
+  it('returns empty triggers and labels when top has no known fields', () => {
+    expect(mergeConfig({}, null)).toEqual({ triggers: [], labels: {} });
   });
 
   it('null override is a no-op', () => {
     expect(mergeConfig({ auto_label_pr: { foo: { color: '111111' } } }, null).labels.foo.color).toBe('111111');
+  });
+
+  describe('auto_update_pr', () => {
+    it('picks up triggers from top-level', () => {
+      const cfg = mergeConfig({ auto_update_pr: { triggers: [{ min_approvals: 2 }] } }, null);
+      expect(cfg.triggers).toEqual([{ min_approvals: 2 }]);
+    });
+
+    it('override replaces triggers entirely', () => {
+      const cfg = mergeConfig(
+        { auto_update_pr: { triggers: [{ approved_by: ['alice'] }] } },
+        { auto_update_pr: { triggers: [{ min_approvals: 1 }] } },
+      );
+      expect(cfg.triggers).toEqual([{ min_approvals: 1 }]);
+    });
+
+    it('override with empty triggers clears them (opt-out)', () => {
+      const cfg = mergeConfig(
+        { auto_update_pr: { triggers: [{ min_approvals: 1 }] } },
+        { auto_update_pr: { triggers: [] } },
+      );
+      expect(cfg.triggers).toEqual([]);
+    });
+
+    it('override without auto_update_pr keeps top triggers', () => {
+      const cfg = mergeConfig(
+        { auto_update_pr: { triggers: [{ min_approvals: 1 }] } },
+        { auto_label_pr: { foo: { color: '111111' } } },
+      );
+      expect(cfg.triggers).toEqual([{ min_approvals: 1 }]);
+    });
   });
 
   describe('auto_label_pr', () => {

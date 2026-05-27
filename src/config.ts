@@ -10,6 +10,12 @@ export type AutoAdd = 'on_pr_creation' | false;
 export type AutoMergeMethod = 'merge' | 'squash' | 'rebase';
 export type LabelMode = 'auto_merge' | 'auto_update';
 
+export interface TriggerCondition {
+  label?: string;
+  approved_by?: string[];
+  min_approvals?: number;
+}
+
 export interface LabelOptions {
   auto_add: AutoAdd;
   create_label_if_missing_in_repo: boolean;
@@ -19,6 +25,7 @@ export interface LabelOptions {
 }
 
 export interface PrMinderConfig {
+  triggers: TriggerCondition[]; // ORed; keys within each object are ANDed
   labels: Record<string, LabelOptions>;
 }
 
@@ -27,7 +34,7 @@ const ORG_CONFIG = '.github/config/pr-minder/pr-minder.jsonc';
 
 export const DEFAULT_LABEL_COLOR = '00FF00';
 
-const DISABLED: PrMinderConfig = { labels: {} };
+const DISABLED: PrMinderConfig = { triggers: [], labels: {} };
 
 export async function loadConfig(owner: string, repo: string, token: string, log: Logger): Promise<PrMinderConfig> {
   try {
@@ -56,9 +63,12 @@ function defaultLabel(): LabelOptions {
 }
 
 export function mergeConfig(top: any, override: any): PrMinderConfig {
-  const result: PrMinderConfig = { labels: {} };
+  const result: PrMinderConfig = { triggers: [], labels: {} };
   for (const src of [top, override]) {
     if (!src) continue;
+    if (src.auto_update_pr && Array.isArray(src.auto_update_pr.triggers)) {
+      result.triggers = src.auto_update_pr.triggers as TriggerCondition[];
+    }
     if (src.auto_label_pr && typeof src.auto_label_pr === 'object') {
       for (const [name, raw] of Object.entries(src.auto_label_pr as Record<string, any>)) {
         if (!raw || typeof raw !== 'object') continue;
