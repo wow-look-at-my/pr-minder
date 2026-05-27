@@ -6,18 +6,22 @@ function parseJsonc(text: string): any {
   return JSON.parse(stripJsonComments(text));
 }
 
+export type AutoAdd = 'on_pr_creation' | false;
+export type AutoMergeMethod = 'merge' | 'squash' | 'rebase';
+export type LabelMode = 'auto_merge' | 'auto_update';
+
 export interface TriggerCondition {
   label?: string;
   approved_by?: string[];
   min_approvals?: number;
 }
 
-export type AutoAdd = 'on_pr_creation' | false;
-
 export interface LabelOptions {
   auto_add: AutoAdd;
   create_label_if_missing_in_repo: boolean;
   color: string; // 6-char hex, no leading '#'
+  mode?: LabelMode; // 'auto_merge': sync with GitHub native auto-merge; 'auto_update': triggers branch updates
+  auto_merge_method: AutoMergeMethod; // merge method used when mode === 'auto_merge' (default: squash)
 }
 
 export interface PrMinderConfig {
@@ -55,7 +59,7 @@ export async function loadConfig(owner: string, repo: string, token: string, log
 }
 
 function defaultLabel(): LabelOptions {
-  return { auto_add: false, create_label_if_missing_in_repo: false, color: DEFAULT_LABEL_COLOR };
+  return { auto_add: false, create_label_if_missing_in_repo: false, color: DEFAULT_LABEL_COLOR, auto_merge_method: 'squash' };
 }
 
 export function mergeConfig(top: any, override: any): PrMinderConfig {
@@ -77,6 +81,12 @@ export function mergeConfig(top: any, override: any): PrMinderConfig {
         }
         if (typeof raw.color === 'string') {
           opts.color = raw.color.replace(/^#/, '');
+        }
+        if (raw.mode === 'auto_merge' || raw.mode === 'auto_update') {
+          opts.mode = raw.mode;
+        }
+        if (raw.auto_merge_method === 'merge' || raw.auto_merge_method === 'squash' || raw.auto_merge_method === 'rebase') {
+          opts.auto_merge_method = raw.auto_merge_method;
         }
         result.labels[name] = opts;
       }

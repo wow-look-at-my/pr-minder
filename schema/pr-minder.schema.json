@@ -44,12 +44,12 @@
       }
     },
     "autoUpdatePr": {
-      "description": "Auto-update settings: keep PR branches in sync with their base branch when conditions are met.",
+      "description": "Approval-gate settings for branch updates. Any passing condition fires update-branch.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "triggers": {
-          "description": "List of trigger conditions. Any passing condition fires a branch update (OR). Keys within a condition are ANDed.",
+          "description": "List of trigger conditions (ORed). Keys within a condition are ANDed.",
           "type": "array",
           "items": { "$ref": "#/$defs/triggerCondition" }
         }
@@ -75,6 +75,15 @@
           "type": "string",
           "pattern": "^#?[0-9a-fA-F]{6}$",
           "default": "00FF00"
+        },
+        "mode": {
+          "description": "'auto_update': PR branch is kept in sync with its base whenever this label is present (complementary to auto_update_pr.triggers). 'auto_merge': adding/removing this label enables/disables GitHub's native auto-merge; toggling auto-merge via the GitHub UI adds/removes the label.",
+          "enum": ["auto_update", "auto_merge"]
+        },
+        "auto_merge_method": {
+          "description": "Merge method to use when enabling auto-merge. Only relevant when mode is 'auto_merge'.",
+          "enum": ["merge", "squash", "rebase"],
+          "default": "squash"
         }
       }
     },
