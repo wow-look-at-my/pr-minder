@@ -76,10 +76,9 @@
           "pattern": "^#?[0-9a-fA-F]{6}$",
           "default": "00FF00"
         },
-        "auto_merge": {
-          "description": "If true, adding this label enables GitHub's native auto-merge on the PR, and removing it disables auto-merge. Conversely, enabling/disabling auto-merge via the GitHub UI will add/remove this label.",
-          "type": "boolean",
-          "default": false
+        "mode": {
+          "description": "'auto_merge': adding/removing this label enables/disables GitHub's native auto-merge, and toggling auto-merge via the GitHub UI adds/removes the label. 'auto_update': this label triggers automatic branch updates (equivalent to listing it in auto_update_pr.triggers).",
+          "enum": ["auto_merge", "auto_update"]
         },
         "auto_merge_method": {
           "description": "Merge method to use when enabling auto-merge. Only relevant when auto_merge is true.",

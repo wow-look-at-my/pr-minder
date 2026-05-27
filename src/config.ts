@@ -14,13 +14,14 @@ export interface TriggerCondition {
 
 export type AutoAdd = 'on_pr_creation' | false;
 export type AutoMergeMethod = 'merge' | 'squash' | 'rebase';
+export type LabelMode = 'auto_merge' | 'auto_update';
 
 export interface LabelOptions {
   auto_add: AutoAdd;
   create_label_if_missing_in_repo: boolean;
   color: string; // 6-char hex, no leading '#'
-  auto_merge: boolean; // if true, bidirectionally syncs this label with GitHub's native auto-merge
-  auto_merge_method: AutoMergeMethod; // merge method when enabling auto-merge (default: squash)
+  mode?: LabelMode; // 'auto_merge': sync with GitHub native auto-merge; 'auto_update': triggers branch updates
+  auto_merge_method: AutoMergeMethod; // merge method used when mode === 'auto_merge' (default: squash)
 }
 
 export interface PrMinderConfig {
@@ -58,7 +59,7 @@ export async function loadConfig(owner: string, repo: string, token: string, log
 }
 
 function defaultLabel(): LabelOptions {
-  return { auto_add: false, create_label_if_missing_in_repo: false, color: DEFAULT_LABEL_COLOR, auto_merge: false, auto_merge_method: 'squash' };
+  return { auto_add: false, create_label_if_missing_in_repo: false, color: DEFAULT_LABEL_COLOR, auto_merge_method: 'squash' };
 }
 
 export function mergeConfig(top: any, override: any): PrMinderConfig {
@@ -81,8 +82,8 @@ export function mergeConfig(top: any, override: any): PrMinderConfig {
         if (typeof raw.color === 'string') {
           opts.color = raw.color.replace(/^#/, '');
         }
-        if (typeof raw.auto_merge === 'boolean') {
-          opts.auto_merge = raw.auto_merge;
+        if (raw.mode === 'auto_merge' || raw.mode === 'auto_update') {
+          opts.mode = raw.mode;
         }
         if (raw.auto_merge_method === 'merge' || raw.auto_merge_method === 'squash' || raw.auto_merge_method === 'rebase') {
           opts.auto_merge_method = raw.auto_merge_method;

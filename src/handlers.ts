@@ -85,7 +85,7 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   if (action === 'labeled' || action === 'unlabeled') {
     const changedLabel = p.label?.name as string | undefined;
     const labelOpts = changedLabel ? config.labels[changedLabel] : undefined;
-    if (labelOpts?.auto_merge) {
+    if (labelOpts?.mode === 'auto_merge') {
       if (action === 'labeled') {
         log.log(`${tag}: enableAutoMerge (label added: "${changedLabel}")`);
         await enableAutoMerge(repo, pr.number, labelOpts.auto_merge_method, token, log);
@@ -102,7 +102,7 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
     await syncAutoMergeLabelDisabled(repo, pr, config, token, log);
   }
 
-  if (config.triggers.length === 0) return;
+  if (config.triggers.length === 0 && !Object.values(config.labels).some(l => l.mode === 'auto_update')) return;
   if (!(await prQualifies(pr, repo, config, token, log))) {
     log.log(`${tag}: skip (no trigger matched; labels=${JSON.stringify(pr.labels?.map((l: any) => l.name))})`);
     return;
@@ -122,7 +122,7 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   const [owner, name] = repo.split('/');
   const config = await loadConfig(owner, name, token, log);
   log.log(`${repo} push: triggers=${config.triggers.length}`);
-  if (config.triggers.length === 0) return;
+  if (config.triggers.length === 0 && !Object.values(config.labels).some(l => l.mode === 'auto_update')) return;
 
   const r = await gh(`/repos/${owner}/${name}/pulls?state=open&per_page=100`, token, log);
   const prs: any[] = await r.json();
@@ -208,7 +208,7 @@ async function applyAutoAddLabels(repo: string, pr: any, config: PrMinderConfig,
 async function syncAutoMergeLabelEnabled(repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
   const tag = `${repo}#${pr.number}`;
   for (const [labelName, opts] of Object.entries(config.labels)) {
-    if (!opts.auto_merge) continue;
+    if (opts.mode !== 'auto_merge') continue;
     if ((pr.labels ?? []).some((l: any) => l.name === labelName)) continue;
     log.log(`${tag}: addLabel "${labelName}" (auto_merge_enabled)`);
     await addLabelsToPr(repo, pr.number, [labelName], token, log);
@@ -219,7 +219,7 @@ async function syncAutoMergeLabelEnabled(repo: string, pr: any, config: PrMinder
 async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
   const tag = `${repo}#${pr.number}`;
   for (const [labelName, opts] of Object.entries(config.labels)) {
-    if (!opts.auto_merge) continue;
+    if (opts.mode !== 'auto_merge') continue;
     if (!(pr.labels ?? []).some((l: any) => l.name === labelName)) continue;
     log.log(`${tag}: removeLabel "${labelName}" (auto_merge_disabled)`);
     await removeLabelFromPr(repo, pr.number, labelName, token, log);
@@ -235,6 +235,9 @@ async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token:
 
   for (const condition of config.triggers) {
     if (await conditionMet(condition, pr, getApprovers)) return true;
+  }
+  for (const [labelName, opts] of Object.entries(config.labels)) {
+    if (opts.mode === 'auto_update' && pr.labels.some((l: any) => l.name === labelName)) return true;
   }
   return false;
 }

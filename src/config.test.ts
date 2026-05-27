@@ -56,7 +56,7 @@ describe('mergeConfig', () => {
         },
       }, null);
       expect(cfg.labels).toEqual({
-        automerge: { auto_add: 'on_pr_creation', create_label_if_missing_in_repo: true, color: 'abcdef', auto_merge: false, auto_merge_method: 'squash' },
+        automerge: { auto_add: 'on_pr_creation', create_label_if_missing_in_repo: true, color: 'abcdef', auto_merge_method: 'squash' },
       });
     });
 
@@ -65,15 +65,15 @@ describe('mergeConfig', () => {
       expect(cfg.labels.foo.color).toBe('FF0000');
     });
 
-    it('defaults: auto_add=false, create_label_if_missing_in_repo=false, color=00FF00, auto_merge=false, auto_merge_method=squash', () => {
+    it('defaults: auto_add=false, create_label_if_missing_in_repo=false, color=00FF00, auto_merge_method=squash, no mode', () => {
       const cfg = mergeConfig({ auto_label_pr: { foo: {} } }, null);
       expect(cfg.labels.foo).toEqual({
         auto_add: false,
         create_label_if_missing_in_repo: false,
         color: DEFAULT_LABEL_COLOR,
-        auto_merge: false,
         auto_merge_method: 'squash',
       });
+      expect(cfg.labels.foo.mode).toBeUndefined();
     });
 
     it('accepts auto_add: false explicitly', () => {
@@ -95,7 +95,6 @@ describe('mergeConfig', () => {
         auto_add: 'on_pr_creation',
         create_label_if_missing_in_repo: false,
         color: 'bbbbbb',
-        auto_merge: false,
         auto_merge_method: 'squash',
       });
     });
@@ -109,19 +108,28 @@ describe('mergeConfig', () => {
         auto_add: false,
         create_label_if_missing_in_repo: false,
         color: 'aaaaaa',
-        auto_merge: false,
         auto_merge_method: 'squash',
       });
     });
 
-    it('parses auto_merge and auto_merge_method', () => {
+    it('parses mode: auto_merge with auto_merge_method', () => {
       const cfg = mergeConfig({
         auto_label_pr: {
-          'auto-pr-merge': { auto_merge: true, auto_merge_method: 'rebase', create_label_if_missing_in_repo: true },
+          'auto-pr-merge': { mode: 'auto_merge', auto_merge_method: 'rebase', create_label_if_missing_in_repo: true },
         },
       }, null);
-      expect(cfg.labels['auto-pr-merge'].auto_merge).toBe(true);
+      expect(cfg.labels['auto-pr-merge'].mode).toBe('auto_merge');
       expect(cfg.labels['auto-pr-merge'].auto_merge_method).toBe('rebase');
+    });
+
+    it('parses mode: auto_update', () => {
+      const cfg = mergeConfig({ auto_label_pr: { 'auto-pr-update': { mode: 'auto_update' } } }, null);
+      expect(cfg.labels['auto-pr-update'].mode).toBe('auto_update');
+    });
+
+    it('ignores invalid mode values', () => {
+      const cfg = mergeConfig({ auto_label_pr: { foo: { mode: 'invalid' } } }, null);
+      expect(cfg.labels.foo.mode).toBeUndefined();
     });
 
     it('ignores invalid auto_merge_method values', () => {
