@@ -88,10 +88,10 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
     if (labelOpts?.mode === 'auto_merge') {
       if (action === 'labeled') {
         log.log(`${tag}: enableAutoMerge (label added: "${changedLabel}")`);
-        await enableAutoMerge(repo, pr.number, labelOpts.auto_merge_method, token, log);
+        await enableAutoMerge(repo, pr.number, pr.node_id, labelOpts.auto_merge_method, token, log);
       } else {
         log.log(`${tag}: disableAutoMerge (label removed: "${changedLabel}")`);
-        await disableAutoMerge(repo, pr.number, token, log);
+        await disableAutoMerge(repo, pr.number, pr.node_id, token, log);
       }
     }
   }

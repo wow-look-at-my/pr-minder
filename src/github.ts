@@ -117,30 +117,59 @@ export async function listInstallationRepos(token: string, log: Logger): Promise
   return repos;
 }
 
-export async function enableAutoMerge(repo: string, num: number, method: string, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}/automerge`, {
-    method: 'PUT',
+// Per-PR auto-merge is exposed ONLY through the GraphQL API
+// (enablePullRequestAutoMerge / disablePullRequestAutoMerge). There is NO REST endpoint:
+// PUT/DELETE /repos/{repo}/pulls/{num}/automerge returns 404 ("Not Found"). Both mutations
+// take the pull request's GraphQL node id (pull_request.node_id from the webhook), not its
+// number. Requires the app to have contents:write + pull_requests:write, "Allow auto-merge"
+// enabled in repo settings, and branch protection with at least one pending requirement.
+const ENABLE_AUTO_MERGE = `mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+  enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: $mergeMethod }) {
+    pullRequest { number }
+  }
+}`;
+
+const DISABLE_AUTO_MERGE = `mutation($pullRequestId: ID!) {
+  disablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId }) {
+    pullRequest { number }
+  }
+}`;
+
+async function graphql(
+  query: string,
+  variables: Record<string, unknown>,
+  token: string,
+): Promise<{ ok: boolean; status: number; errors: unknown; body: string }> {
+  const r = await fetch('https://api.github.com/graphql', {
+    method: 'POST',
     headers: { ...ghHeaders(token), 'content-type': 'application/json' },
-    body: JSON.stringify({ merge_method: method }),
+    body: JSON.stringify({ query, variables }),
   });
-  if (r.ok) { log.log(`enableAutoMerge ${repo}#${num}: ok`); return; }
   const body = await r.text();
-  log.log(`enableAutoMerge ${repo}#${num}: ${r.status} ${body}`);
-  // 403 = auto-merge not enabled in repo settings; 422 = validation (already enabled, etc.)
-  if (r.status === 403 || r.status === 422) return;
-  throw new GhError(r.status, body);
+  // GraphQL signals logical failures as HTTP 200 with a top-level `errors` array.
+  let errors: unknown;
+  try { errors = (JSON.parse(body) as { errors?: unknown }).errors; } catch { /* non-JSON body */ }
+  return { ok: r.ok, status: r.status, errors, body };
 }
 
-export async function disableAutoMerge(repo: string, num: number, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}/automerge`, {
-    method: 'DELETE',
-    headers: ghHeaders(token),
-  });
-  if (r.ok) { log.log(`disableAutoMerge ${repo}#${num}: ok`); return; }
-  const body = await r.text();
-  log.log(`disableAutoMerge ${repo}#${num}: ${r.status} ${body}`);
-  if (r.status === 404 || r.status === 422) return;
-  throw new GhError(r.status, body);
+export async function enableAutoMerge(repo: string, num: number, nodeId: string, method: string, token: string, log: Logger): Promise<void> {
+  // mergeMethod is the PullRequestMergeMethod enum: MERGE | SQUASH | REBASE (uppercase).
+  const mergeMethod = (method || 'squash').toUpperCase();
+  const { ok, status, errors, body } = await graphql(ENABLE_AUTO_MERGE, { pullRequestId: nodeId, mergeMethod }, token);
+  if (ok && !errors) { log.log(`enableAutoMerge ${repo}#${num}: ok`); return; }
+  log.log(`enableAutoMerge ${repo}#${num}: ${status} ${body}`);
+  // HTTP 200 + errors[] = non-retryable logical failure: auto-merge not allowed in the repo,
+  // PR already mergeable ("clean status"), requirements unmet, or already enabled. Swallow it
+  // (mirrors the old 403/422 handling). A non-2xx is a transport failure — throw so GitHub retries.
+  if (!ok) throw new GhError(status, body);
+}
+
+export async function disableAutoMerge(repo: string, num: number, nodeId: string, token: string, log: Logger): Promise<void> {
+  const { ok, status, errors, body } = await graphql(DISABLE_AUTO_MERGE, { pullRequestId: nodeId }, token);
+  if (ok && !errors) { log.log(`disableAutoMerge ${repo}#${num}: ok`); return; }
+  log.log(`disableAutoMerge ${repo}#${num}: ${status} ${body}`);
+  // HTTP 200 + errors[] = nothing to disable (auto-merge wasn't enabled) or similar — non-fatal.
+  if (!ok) throw new GhError(status, body);
 }
 
 export async function removeLabelFromPr(repo: string, num: number, label: string, token: string, log: Logger): Promise<void> {
