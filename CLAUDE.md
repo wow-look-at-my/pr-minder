@@ -20,11 +20,19 @@ wrangler.toml             Worker name, compat date, plain vars (AUTOMERGE_LABEL,
 Do NOT run `tsc` or `wrangler` directly. Use:
 ```sh
 npm run typecheck   # tsc --noEmit
-npm run deploy      # wrangler deploy
 npm run dev         # wrangler dev
 ```
 
 There is no Go in this project — do not use `go-toolchain`.
+
+## Deployment — NEVER deploy manually
+
+It is **never** valid to deploy by hand. Do NOT run `npm run deploy`,
+`wrangler deploy`, or any other deploy command — not even to "test" or "ship a
+fix faster". Cloudflare's Git integration watches this repo and deploys
+automatically: a preview Worker for every PR branch, and **production on merge to
+`main`**. Manual deploys bypass that pipeline and are never the right move — ship
+by merging the PR.
 
 ## Secrets (never committed)
 
