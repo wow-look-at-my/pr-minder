@@ -111,9 +111,9 @@ In overrides, `auto_update_pr` replaces the parent's `auto_update_pr` entirely. 
 
 The JSON Schema at [`schema/pr-minder.schema.json`](schema/pr-minder.schema.json) provides IDE validation and autocomplete when referenced via `$schema`.
 
-## Pairing with GitHub auto-merge
+## Merging PRs
 
-This worker only keeps branches **fresh** — it does not merge PRs. Pair it with [GitHub's native auto-merge](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request) (`gh pr merge --auto --squash`) so the actual merge happens once CI passes.
+By default this worker only keeps branches **fresh** (`auto_update_pr` and `mode: "auto_update"`) and does not merge. To have it merge, give a label `mode: "auto_merge"` in `auto_label_pr`: adding that label arms [GitHub's native auto-merge](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request) so the PR merges once CI and required reviews pass. If the PR is **already mergeable** — GitHub reports "clean status" and won't arm auto-merge — the worker merges it directly using the label's `auto_merge_method` (`squash` by default). Branch protection still gates every merge.
 
 ## Local development
 

@@ -55,7 +55,7 @@ Set via `wrangler secret put <NAME>`:
 - `auto_add: "on_pr_creation"` — apply label when a PR is opened.
 - `create_label_if_missing_in_repo: true` — create the label in the repo (with `color`) if absent.
 - `mode: "auto_update"` — when this label is present on a PR, keep the branch in sync with its base (complementary to `auto_update_pr.triggers`).
-- `mode: "auto_merge"` — bidirectionally syncs this label with GitHub's native auto-merge. Adding the label enables auto-merge; removing it disables auto-merge. `auto_merge_enabled`/`auto_merge_disabled` webhook events add/remove the label.
+- `mode: "auto_merge"` — bidirectionally syncs this label with GitHub's native auto-merge. Adding the label enables auto-merge; removing it disables auto-merge. `auto_merge_enabled`/`auto_merge_disabled` webhook events add/remove the label. If the PR is **already mergeable**, GitHub refuses to arm auto-merge (`enablePullRequestAutoMerge` returns 200 + an `errors[]` entry whose message contains `"clean status"`); in that case `enableAutoMerge` falls back to merging the PR directly via `mergePullRequest` (REST `PUT .../merge`) with `auto_merge_method`. Branch protection still gates the merge.
 - `auto_merge_method` — `"merge"`, `"squash"` (default), or `"rebase"`. Only used when `mode` is `"auto_merge"`.
 
 There is no top-level `enabled`; "disable" means omitting the relevant label/mode or leaving `triggers` empty.

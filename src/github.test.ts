@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -18,6 +18,18 @@ function stubFetch(status: number, body: unknown) {
 }
 
 const sentBody = (fn: ReturnType<typeof stubFetch>) => JSON.parse(fn.mock.calls[0][1].body);
+
+// Route responses by URL substring, for flows that hit more than one endpoint.
+function stubFetchRoutes(routes: Array<{ match: string; status: number; body: unknown }>) {
+  const fn = vi.fn(async (url: string, _init: FetchInit) => {
+    const route = routes.find((r) => url.includes(r.match));
+    if (!route) throw new Error(`unexpected fetch to ${url}`);
+    const text = typeof route.body === 'string' ? route.body : JSON.stringify(route.body);
+    return { ok: route.status >= 200 && route.status < 300, status: route.status, text: async () => text };
+  });
+  vi.stubGlobal('fetch', fn);
+  return fn;
+}
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -44,14 +56,58 @@ describe('enableAutoMerge', () => {
     }
   });
 
-  it('swallows GraphQL logical errors (HTTP 200 + errors[])', async () => {
-    stubFetch(200, { errors: [{ message: 'Pull request Auto merge is not allowed for this repository' }] });
+  it('swallows other GraphQL logical errors without merging (e.g. auto-merge not allowed)', async () => {
+    const fetchMock = stubFetchRoutes([
+      { match: '/graphql', status: 200, body: { errors: [{ message: 'Pull request Auto merge is not allowed for this repository' }] } },
+    ]);
     await expect(enableAutoMerge('o/r', 5, 'PR_x', 'squash', 'tok', new Logger())).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls.every(([url]) => !url.includes('/merge'))).toBe(true);
+  });
+
+  it('falls back to a direct merge when the PR is already in "clean status"', async () => {
+    const fetchMock = stubFetchRoutes([
+      { match: '/graphql', status: 200, body: { data: { enablePullRequestAutoMerge: null }, errors: [{ type: 'UNPROCESSABLE', message: 'Pull request Pull request is in clean status' }] } },
+      { match: '/pulls/163/merge', status: 200, body: { merged: true } },
+    ]);
+    await enableAutoMerge('o/r', 163, 'PR_x', 'rebase', 'tok', new Logger());
+
+    const mergeCall = fetchMock.mock.calls.find(([url]) => url.includes('/pulls/163/merge'));
+    expect(mergeCall).toBeDefined();
+    expect(mergeCall![0]).toBe('https://api.github.com/repos/o/r/pulls/163/merge');
+    expect(mergeCall![1].method).toBe('PUT');
+    expect(JSON.parse(mergeCall![1].body).merge_method).toBe('rebase');
   });
 
   it('throws GhError on a transport failure (non-2xx)', async () => {
     stubFetch(500, 'boom');
     await expect(enableAutoMerge('o/r', 5, 'PR_x', 'squash', 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
+  });
+});
+
+describe('mergePullRequest', () => {
+  it('PUTs the REST merge with the configured (lowercase) method', async () => {
+    const fetchMock = stubFetch(200, { merged: true });
+    await mergePullRequest('o/r', 5, 'squash', 'tok', new Logger());
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/o/r/pulls/5/merge');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({ merge_method: 'squash' });
+  });
+
+  it('swallows a 405 (PR not mergeable) without throwing', async () => {
+    stubFetch(405, { message: 'Pull Request is not mergeable' });
+    await expect(mergePullRequest('o/r', 5, 'squash', 'tok', new Logger())).resolves.toBeUndefined();
+  });
+
+  it('swallows a 409 (head moved) without throwing', async () => {
+    stubFetch(409, { message: 'Head branch was modified. Review and try the merge again.' });
+    await expect(mergePullRequest('o/r', 5, 'squash', 'tok', new Logger())).resolves.toBeUndefined();
+  });
+
+  it('throws on 5xx (transient)', async () => {
+    stubFetch(503, 'service unavailable');
+    await expect(mergePullRequest('o/r', 5, 'squash', 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
   });
 });
 
@@ -75,5 +131,27 @@ describe('disableAutoMerge', () => {
   it('throws GhError on a transport failure (non-2xx)', async () => {
     stubFetch(502, 'bad gateway');
     await expect(disableAutoMerge('o/r', 7, 'PR_x', 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
+  });
+});
+
+describe('updateBranch', () => {
+  it('resolves on 202 Accepted', async () => {
+    stubFetch(202, '');
+    await expect(updateBranch('o/r', 1, 'tok', new Logger())).resolves.toBeUndefined();
+  });
+
+  it('swallows the "no new commits on the base branch" 422 (branch already current)', async () => {
+    stubFetch(422, { message: 'There are no new commits on the base branch.' });
+    await expect(updateBranch('o/r', 163, 'tok', new Logger())).resolves.toBeUndefined();
+  });
+
+  it('throws on a genuine 422 such as a merge conflict', async () => {
+    stubFetch(422, { message: 'merge conflict between base and head' });
+    await expect(updateBranch('o/r', 1, 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
+  });
+
+  it('throws on non-422 failures (e.g. 403)', async () => {
+    stubFetch(403, { message: 'Resource not accessible by integration' });
+    await expect(updateBranch('o/r', 1, 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
   });
 });
