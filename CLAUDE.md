@@ -55,6 +55,7 @@ There is no top-level `enabled`; "disable" means omitting the relevant label/mod
 ## Key invariants
 
 - `update-branch` returns 422 when already up to date — this is not an error (handled in `github.ts`)
+- Auto-merge (`enableAutoMerge`/`disableAutoMerge`) is **GraphQL-only** — there is no REST endpoint (`PUT/DELETE /repos/{repo}/pulls/{num}/automerge` returns 404). The mutations take the PR's `node_id` (from the webhook payload), not its number, and need contents:write + pull_requests:write. GraphQL logical failures arrive as HTTP 200 + an `errors[]` array (swallowed); only non-2xx transport failures throw.
 - `pull_request_review` webhook sends `review.state` lowercase; the reviews REST API returns uppercase `APPROVED` — both cases are handled
 - GitHub App must subscribe to `pull_request`, `pull_request_review`, and `push` events; `installation` and `installation_repositories` are auto-delivered
 - JWT validity window is `iat - 60s` to `exp + 540s` (GitHub allows up to 10 min; we use 9)
