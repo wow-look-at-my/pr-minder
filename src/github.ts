@@ -46,11 +46,13 @@ export async function updateBranch(repo: string, num: number, token: string, log
     headers: ghHeaders(token),
   });
   if (r.ok) return;
-  // 422 is GitHub's catch-all "Unprocessable Entity" — could be "not behind" (no-op),
-  // but also merge conflict, blocked-by-protection, etc. Log the body so we can tell.
+  // 422 is GitHub's catch-all "Unprocessable Entity". The common no-op is the branch already
+  // being current — GitHub phrases that as "There are no new commits on the base branch."
+  // That is not an error. Genuine 422s (merge conflict, blocked-by-protection) are real, so
+  // log the body either way and rethrow only the ones that aren't the already-current no-op.
   const body = await r.text();
   log.log(`updateBranch ${repo}#${num}: ${r.status} ${body}`);
-  if (r.status === 422 && /not behind|up.?to.?date|merge commit/i.test(body)) return;
+  if (r.status === 422 && /not behind|up.?to.?date|merge commit|no new commits/i.test(body)) return;
   throw new GhError(r.status, body);
 }
 
@@ -158,10 +160,43 @@ export async function enableAutoMerge(repo: string, num: number, nodeId: string,
   const { ok, status, errors, body } = await graphql(ENABLE_AUTO_MERGE, { pullRequestId: nodeId, mergeMethod }, token);
   if (ok && !errors) { log.log(`enableAutoMerge ${repo}#${num}: ok`); return; }
   log.log(`enableAutoMerge ${repo}#${num}: ${status} ${body}`);
-  // HTTP 200 + errors[] = non-retryable logical failure: auto-merge not allowed in the repo,
-  // PR already mergeable ("clean status"), requirements unmet, or already enabled. Swallow it
-  // (mirrors the old 403/422 handling). A non-2xx is a transport failure — throw so GitHub retries.
+  // A non-2xx is a transport failure — throw so GitHub retries.
   if (!ok) throw new GhError(status, body);
+  // HTTP 200 + errors[] = logical failure. The common one for an already-green PR is
+  // "Pull request is in clean status": GitHub refuses native auto-merge when nothing is pending
+  // (no required checks/reviews left to wait on). The label means "merge this", so the right
+  // move is to merge it directly with the configured method.
+  if (graphqlErrorsMatch(errors, /clean status/i)) {
+    log.log(`enableAutoMerge ${repo}#${num}: PR already mergeable, merging directly`);
+    await mergePullRequest(repo, num, method, token, log);
+    return;
+  }
+  // Other logical errors (auto-merge not allowed in the repo, already enabled, etc.) are
+  // non-retryable and need no action — swallow them.
+}
+
+// Direct merge via the REST endpoint (this one DOES exist, unlike per-PR auto-merge). Used as
+// the fallback when a PR is already mergeable. merge_method is lowercase: merge | squash | rebase.
+export async function mergePullRequest(repo: string, num: number, method: string, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}/merge`, {
+    method: 'PUT',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ merge_method: method || 'squash' }),
+  });
+  if (r.ok) { log.log(`mergePullRequest ${repo}#${num}: merged (${method || 'squash'})`); return; }
+  const body = await r.text();
+  log.log(`mergePullRequest ${repo}#${num}: ${r.status} ${body}`);
+  // 4xx = GitHub declined (405 not mergeable, 409 head moved, 422 validation, 403 forbidden):
+  // branch protection still gates the merge, and none are retryable, so log and move on. 5xx is
+  // transient — throw so GitHub redelivers the webhook.
+  if (r.status >= 500) throw new GhError(r.status, body);
+}
+
+// GraphQL logical errors arrive as a top-level `errors` array; test their messages.
+function graphqlErrorsMatch(errors: unknown, re: RegExp): boolean {
+  return Array.isArray(errors) && errors.some(
+    (e) => e && typeof (e as { message?: unknown }).message === 'string' && re.test((e as { message: string }).message),
+  );
 }
 
 export async function disableAutoMerge(repo: string, num: number, nodeId: string, token: string, log: Logger): Promise<void> {
