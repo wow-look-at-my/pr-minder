@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -12,6 +12,7 @@ function stubFetch(status: number, body: unknown) {
     ok: status >= 200 && status < 300,
     status,
     text: async () => text,
+    json: async () => JSON.parse(text),
   }));
   vi.stubGlobal('fetch', fn);
   return fn;
@@ -155,6 +156,29 @@ describe('retriggerWorkflows', () => {
     const fetchMock = stubFetch(403, { message: 'Resource not accessible by integration' });
     await expect(retriggerWorkflows('o/r', 5, 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('hasWorkflowRuns', () => {
+  it('queries the runs endpoint filtered by head_sha', async () => {
+    const fetchMock = stubFetch(200, { total_count: 0, workflow_runs: [] });
+    await hasWorkflowRuns('o/r', 'deadbeef', 'tok', new Logger());
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/actions/runs?head_sha=deadbeef&per_page=1');
+  });
+
+  it('is true when the head commit has at least one run', async () => {
+    stubFetch(200, { total_count: 3, workflow_runs: [{ id: 1 }] });
+    expect(await hasWorkflowRuns('o/r', 'sha', 'tok', new Logger())).toBe(true);
+  });
+
+  it('is false when the head commit has no runs (a zombie)', async () => {
+    stubFetch(200, { total_count: 0, workflow_runs: [] });
+    expect(await hasWorkflowRuns('o/r', 'sha', 'tok', new Logger())).toBe(false);
+  });
+
+  it('fails safe to true on a non-2xx, so a transient error never forces a reopen', async () => {
+    stubFetch(500, 'boom');
+    expect(await hasWorkflowRuns('o/r', 'sha', 'tok', new Logger())).toBe(true);
   });
 });
 

@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, gh } from './github';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -77,14 +77,15 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
 
   if (action === 'opened') {
     await applyAutoAddLabels(repo, pr, config, token, log);
+  }
 
-    // Revive a "zombie" PR: one opened by github-actions[bot] (i.e. created with the
-    // default GITHUB_TOKEN) never triggered its own workflows, because GitHub suppresses
-    // recursive runs from that token. Closing+reopening with our App token fires a fresh
-    // `pull_request.reopened` event, which runs the workflows. The reopened event re-enters
-    // onPR but won't re-trigger (action !== 'opened'), so this can't loop.
-    if (config.autoTriggerWorkflows && isActionsBotPr(pr)) {
-      log.log(`${tag}: zombie PR by github-actions[bot]; re-triggering workflows (close+reopen)`);
+  // Revive a "zombie" PR — one with no workflow runs of its own. A PR created with the
+  // default GITHUB_TOKEN (author github-actions[bot]) is the classic case: GitHub suppresses
+  // its workflows to avoid recursion. Closing+reopening with our App token fires a fresh
+  // `pull_request.reopened` event (a default activity type) that DOES run them.
+  if (config.autoTriggerWorkflows && (action === 'opened' || action === 'reopened')) {
+    if (await needsWorkflowTrigger(p, action, repo, pr, token, log)) {
+      log.log(`${tag}: zombie PR with no workflow runs; re-triggering (close+reopen)`);
       await retriggerWorkflows(repo, pr.number, token, log);
       return;
     }
@@ -240,6 +241,23 @@ async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinde
 // that account's identity instead and trigger workflows normally.
 export function isActionsBotPr(pr: any): boolean {
   return pr?.user?.login === 'github-actions[bot]';
+}
+
+// Decide whether a just-opened or reopened PR needs its workflows kicked off.
+//
+// `opened`: the PR is brand new, so EVERY PR momentarily has zero runs — an empty run list
+// can't tell a zombie from a healthy PR whose runs haven't registered yet. The only race-free
+// signal is the author: github-actions[bot] means it was created with the default GITHUB_TOKEN,
+// whose events GitHub refuses to let trigger workflows.
+//
+// `reopened`: the PR isn't fresh, so an empty run list is trustworthy — trigger any PR that
+// still has no runs, whatever its author. Reopens performed by a bot (our own close+reopen, or
+// another GITHUB_TOKEN actor) are skipped via the sender, so our reopen can't loop.
+async function needsWorkflowTrigger(p: any, action: string, repo: string, pr: any, token: string, log: Logger): Promise<boolean> {
+  if (action === 'opened') return isActionsBotPr(pr);
+  if (p.sender?.type === 'Bot') return false;
+  if (!pr.head?.sha) return false;
+  return !(await hasWorkflowRuns(repo, pr.head.sha, token, log));
 }
 
 async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<boolean> {

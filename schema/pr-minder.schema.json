@@ -57,7 +57,7 @@
       }
     },
     "autoTriggerWorkflows": {
-      "description": "Re-trigger CI for PRs opened by github-actions[bot]. A PR created with the default GITHUB_TOKEN never triggers its own workflows (GitHub suppresses recursive runs), leaving a 'zombie' PR with no checks. When true, pr-minder closes and reopens such PRs with its own App credentials so their `pull_request` workflows actually run. Opt-in; defaults to false.",
+      "description": "Re-trigger CI for 'zombie' PRs that have no workflow runs of their own. A PR created with the default GITHUB_TOKEN (author github-actions[bot]) never triggers its workflows (GitHub suppresses recursive runs); on the `opened` event pr-minder revives those. On the `reopened` event it revives any open PR that still has zero workflow runs, whatever its author. The fix is a close+reopen with the App's own credentials, which fires a fresh `pull_request.reopened` event that runs the workflows. Opt-in; defaults to false.",
       "type": "boolean",
       "default": false
     },

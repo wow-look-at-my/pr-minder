@@ -80,6 +80,17 @@ async function setPullState(repo: string, num: number, state: 'open' | 'closed',
   throw new GhError(r.status, body);
 }
 
+// Does the PR's head commit have any GitHub Actions workflow runs? Distinguishes a genuine
+// "zombie" PR (created by a workflow's GITHUB_TOKEN, so its workflows never fired) from one
+// whose CI has already run. On a query error we assume runs exist, so a transient failure
+// can never trigger a spurious close+reopen.
+export async function hasWorkflowRuns(repo: string, headSha: string, token: string, log: Logger): Promise<boolean> {
+  const r = await gh(`/repos/${repo}/actions/runs?head_sha=${headSha}&per_page=1`, token, log);
+  if (!r.ok) return true;
+  const data: any = await r.json();
+  return (data.total_count ?? 0) > 0;
+}
+
 export async function addLabelsToPr(repo: string, num: number, labels: string[], token: string, log: Logger): Promise<void> {
   if (labels.length === 0) return;
   const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/labels`, {

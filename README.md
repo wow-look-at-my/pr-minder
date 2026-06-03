@@ -120,19 +120,24 @@ By default this worker only keeps branches **fresh** (`auto_update_pr` and `mode
 
 When a GitHub Actions workflow opens a pull request using the default `GITHUB_TOKEN`, GitHub [deliberately suppresses the PR's own workflows](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow#triggering-a-workflow-from-a-workflow) — "events triggered by the `GITHUB_TOKEN` will not create a new workflow run" — to prevent recursive runs. The result is a **"zombie" PR**: it's open, but none of its required `pull_request` checks ever ran, so it can never go green or merge.
 
-GitHub's documented fix is to act with a credential other than `GITHUB_TOKEN`. pr-minder already authenticates as a GitHub App, so when `auto_trigger_workflows` is enabled it **closes and immediately reopens** any PR opened by `github-actions[bot]`. The reopen fires a fresh `pull_request.reopened` event (a default activity type) attributed to the App rather than `GITHUB_TOKEN`, which runs the PR's workflows for real.
+GitHub's documented fix is to act with a credential other than `GITHUB_TOKEN`. pr-minder already authenticates as a GitHub App, so when `auto_trigger_workflows` is enabled it **closes and immediately reopens** the zombie. The reopen fires a fresh `pull_request.reopened` event (a default activity type) attributed to the App rather than `GITHUB_TOKEN`, which runs the PR's workflows for real.
 
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
-  // Revive zombie PRs created by GitHub Actions (github-actions[bot]) so their CI runs.
+  // Revive zombie PRs that have no CI runs so their workflows actually run.
   "auto_trigger_workflows": true
 }
 ```
 
+It listens on both the `opened` and `reopened` webhooks, but the test for "is this a zombie?" differs by event, because of a timing subtlety:
+
+- **On `opened`** it keys on the **author** being `github-actions[bot]`. A brand-new PR always has zero runs for an instant (runs register asynchronously), so "no runs yet" can't tell a zombie from a healthy PR — but the author can: `github-actions[bot]` is exactly the set of PRs created with `GITHUB_TOKEN`, whose workflows are suppressed. PRs created via a PAT or another App token carry that account's identity and trigger CI normally, so they're left untouched (as are Dependabot PRs).
+- **On `reopened`** it keys on the PR actually having **zero workflow runs** for its head commit (`GET /actions/runs?head_sha=…`), regardless of author. A reopened PR isn't fresh, so an empty run list is trustworthy. This also catches zombies that predate the App's installation.
+
 Notes:
-- **Opt-in**, off by default. It only acts on PRs whose author is `github-actions[bot]` — i.e. PRs created with the default `GITHUB_TOKEN`. PRs created via a PAT or another App token already trigger their workflows and are left untouched. Dependabot PRs (`dependabot[bot]`) are also untouched.
-- It fires only on the `opened` event, the moment the zombie is born. The resulting `reopened` event re-enters the handler but doesn't re-trigger (the guard is `opened`-only), so there's no close/reopen loop.
+- **Opt-in**, off by default.
+- **No loop.** The close+reopen we perform comes back as a `reopened` event whose `sender` is the App's own bot; reopens from any bot sender are skipped, so it can't cycle. If a query for existing runs fails, pr-minder assumes runs exist and does nothing — a transient error never causes a spurious reopen.
 - No extra permissions are needed — close/reopen uses the same `pull_requests: write` the App already requires.
 
 ## Local development
