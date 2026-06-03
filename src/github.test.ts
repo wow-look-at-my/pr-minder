@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -131,6 +131,30 @@ describe('disableAutoMerge', () => {
   it('throws GhError on a transport failure (non-2xx)', async () => {
     stubFetch(502, 'bad gateway');
     await expect(disableAutoMerge('o/r', 7, 'PR_x', 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
+  });
+});
+
+describe('retriggerWorkflows', () => {
+  it('PATCHes the PR closed then back open (close+reopen fires a fresh pull_request event)', async () => {
+    const fetchMock = stubFetch(200, { number: 5 });
+    await retriggerWorkflows('o/r', 5, 'tok', new Logger());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [closeUrl, closeInit] = fetchMock.mock.calls[0];
+    expect(closeUrl).toBe('https://api.github.com/repos/o/r/pulls/5');
+    expect(closeInit.method).toBe('PATCH');
+    expect(JSON.parse(closeInit.body)).toEqual({ state: 'closed' });
+
+    const [openUrl, openInit] = fetchMock.mock.calls[1];
+    expect(openUrl).toBe('https://api.github.com/repos/o/r/pulls/5');
+    expect(openInit.method).toBe('PATCH');
+    expect(JSON.parse(openInit.body)).toEqual({ state: 'open' });
+  });
+
+  it('throws GhError if the close fails (and never attempts the reopen)', async () => {
+    const fetchMock = stubFetch(403, { message: 'Resource not accessible by integration' });
+    await expect(retriggerWorkflows('o/r', 5, 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

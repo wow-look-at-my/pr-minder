@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { conditionMet } from './handlers';
+import { conditionMet, isActionsBotPr } from './handlers';
 
 const noApprovers = async () => new Set<string>();
 const approvers = (...names: string[]) => async () => new Set(names);
@@ -66,5 +66,24 @@ describe('conditionMet', () => {
 
   it('empty condition (no keys) passes trivially', async () => {
     expect(await conditionMet({}, pr([]), noApprovers)).toBe(true);
+  });
+});
+
+describe('isActionsBotPr', () => {
+  it('is true for a PR authored by github-actions[bot]', () => {
+    expect(isActionsBotPr({ user: { login: 'github-actions[bot]' } })).toBe(true);
+  });
+
+  it('is false for a human author', () => {
+    expect(isActionsBotPr({ user: { login: 'alice' } })).toBe(false);
+  });
+
+  it('is false for other bots (e.g. dependabot, which does trigger its own workflows)', () => {
+    expect(isActionsBotPr({ user: { login: 'dependabot[bot]' } })).toBe(false);
+  });
+
+  it('is false when the author is missing', () => {
+    expect(isActionsBotPr({})).toBe(false);
+    expect(isActionsBotPr(undefined)).toBe(false);
   });
 });

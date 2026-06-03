@@ -62,6 +62,7 @@ Top-level sections:
 
 - `auto_update_pr.triggers` — array of condition objects. Keys within one object are ANDed; multiple objects are ORed.
 - `auto_label_pr` — map of label name to per-label settings.
+- `auto_trigger_workflows` — boolean. Re-trigger CI for PRs opened by `github-actions[bot]` (see [Re-triggering CI for bot-created PRs](#re-triggering-ci-for-bot-created-prs)). Defaults to `false`.
 
 **Per-repo** (`.github/pr-minder.jsonc`):
 ```jsonc
@@ -114,6 +115,25 @@ The JSON Schema at [`schema/pr-minder.schema.json`](schema/pr-minder.schema.json
 ## Merging PRs
 
 By default this worker only keeps branches **fresh** (`auto_update_pr` and `mode: "auto_update"`) and does not merge. To have it merge, give a label `mode: "auto_merge"` in `auto_label_pr`: adding that label arms [GitHub's native auto-merge](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request) so the PR merges once CI and required reviews pass. If the PR is **already mergeable** — GitHub reports "clean status" and won't arm auto-merge — the worker merges it directly using the label's `auto_merge_method` (`squash` by default). Branch protection still gates every merge.
+
+## Re-triggering CI for bot-created PRs
+
+When a GitHub Actions workflow opens a pull request using the default `GITHUB_TOKEN`, GitHub [deliberately suppresses the PR's own workflows](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow#triggering-a-workflow-from-a-workflow) — "events triggered by the `GITHUB_TOKEN` will not create a new workflow run" — to prevent recursive runs. The result is a **"zombie" PR**: it's open, but none of its required `pull_request` checks ever ran, so it can never go green or merge.
+
+GitHub's documented fix is to act with a credential other than `GITHUB_TOKEN`. pr-minder already authenticates as a GitHub App, so when `auto_trigger_workflows` is enabled it **closes and immediately reopens** any PR opened by `github-actions[bot]`. The reopen fires a fresh `pull_request.reopened` event (a default activity type) attributed to the App rather than `GITHUB_TOKEN`, which runs the PR's workflows for real.
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
+  // Revive zombie PRs created by GitHub Actions (github-actions[bot]) so their CI runs.
+  "auto_trigger_workflows": true
+}
+```
+
+Notes:
+- **Opt-in**, off by default. It only acts on PRs whose author is `github-actions[bot]` — i.e. PRs created with the default `GITHUB_TOKEN`. PRs created via a PAT or another App token already trigger their workflows and are left untouched. Dependabot PRs (`dependabot[bot]`) are also untouched.
+- It fires only on the `opened` event, the moment the zombie is born. The resulting `reopened` event re-enters the handler but doesn't re-trigger (the guard is `opened`-only), so there's no close/reopen loop.
+- No extra permissions are needed — close/reopen uses the same `pull_requests: write` the App already requires.
 
 ## Local development
 

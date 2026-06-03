@@ -3,7 +3,7 @@ import { mergeConfig, DEFAULT_LABEL_COLOR } from './config';
 
 describe('mergeConfig', () => {
   it('returns empty triggers and labels when top has no known fields', () => {
-    expect(mergeConfig({}, null)).toEqual({ triggers: [], labels: {} });
+    expect(mergeConfig({}, null)).toEqual({ triggers: [], labels: {}, autoTriggerWorkflows: false });
   });
 
   it('null override is a no-op', () => {
@@ -38,6 +38,35 @@ describe('mergeConfig', () => {
         { auto_label_pr: { foo: { color: '111111' } } },
       );
       expect(cfg.triggers).toEqual([{ min_approvals: 1 }]);
+    });
+  });
+
+  describe('auto_trigger_workflows', () => {
+    it('defaults to false when absent', () => {
+      expect(mergeConfig({}, null).autoTriggerWorkflows).toBe(false);
+    });
+
+    it('is picked up from the top level', () => {
+      expect(mergeConfig({ auto_trigger_workflows: true }, null).autoTriggerWorkflows).toBe(true);
+    });
+
+    it('ignores non-boolean values', () => {
+      expect(mergeConfig({ auto_trigger_workflows: 'yes' }, null).autoTriggerWorkflows).toBe(false);
+    });
+
+    it('a per-repo override can enable it', () => {
+      const cfg = mergeConfig({}, { auto_trigger_workflows: true });
+      expect(cfg.autoTriggerWorkflows).toBe(true);
+    });
+
+    it('a per-repo override can disable it (opt-out)', () => {
+      const cfg = mergeConfig({ auto_trigger_workflows: true }, { auto_trigger_workflows: false });
+      expect(cfg.autoTriggerWorkflows).toBe(false);
+    });
+
+    it('an override that omits the field keeps the top-level value', () => {
+      const cfg = mergeConfig({ auto_trigger_workflows: true }, { auto_label_pr: { foo: {} } });
+      expect(cfg.autoTriggerWorkflows).toBe(true);
     });
   });
 

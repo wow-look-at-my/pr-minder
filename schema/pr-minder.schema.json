@@ -12,6 +12,7 @@
     },
     "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
     "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" },
+    "auto_trigger_workflows": { "$ref": "#/$defs/autoTriggerWorkflows" },
     "repos": {
       "description": "Per-repo config overrides. Only meaningful in the org-level .github/config/pr-minder/pr-minder.jsonc; ignored in per-repo config files.",
       "type": "object",
@@ -54,6 +55,11 @@
           "items": { "$ref": "#/$defs/triggerCondition" }
         }
       }
+    },
+    "autoTriggerWorkflows": {
+      "description": "Re-trigger CI for PRs opened by github-actions[bot]. A PR created with the default GITHUB_TOKEN never triggers its own workflows (GitHub suppresses recursive runs), leaving a 'zombie' PR with no checks. When true, pr-minder closes and reopens such PRs with its own App credentials so their `pull_request` workflows actually run. Opt-in; defaults to false.",
+      "type": "boolean",
+      "default": false
     },
     "labelOptions": {
       "description": "Settings for a single label name.",
@@ -101,7 +107,8 @@
           "type": "string"
         },
         "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
-        "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" }
+        "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" },
+        "auto_trigger_workflows": { "$ref": "#/$defs/autoTriggerWorkflows" }
       }
     }
   }

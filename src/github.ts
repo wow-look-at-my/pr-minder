@@ -56,6 +56,30 @@ export async function updateBranch(repo: string, num: number, token: string, log
   throw new GhError(r.status, body);
 }
 
+// A PR opened with the default GITHUB_TOKEN (author github-actions[bot]) never triggers
+// its own workflows: GitHub suppresses runs from that token to prevent recursion. Closing
+// and reopening the PR with a *different* credential — our App's installation token — fires
+// a fresh `pull_request.reopened` event (a default activity type), which DOES run the
+// `on: pull_request` workflows. This is GitHub's documented workaround for a "zombie" PR
+// that has no CI, and needs only pull_requests:write (which the App already holds).
+export async function retriggerWorkflows(repo: string, num: number, token: string, log: Logger): Promise<void> {
+  await setPullState(repo, num, 'closed', token, log);
+  await setPullState(repo, num, 'open', token, log);
+  log.log(`retriggerWorkflows ${repo}#${num}: closed+reopened to trigger workflows`);
+}
+
+async function setPullState(repo: string, num: number, state: 'open' | 'closed', token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+    method: 'PATCH',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ state }),
+  });
+  if (r.ok) { log.log(`setPullState ${repo}#${num}: ${state}`); return; }
+  const body = await r.text();
+  log.log(`setPullState ${repo}#${num} -> ${state}: ${r.status} ${body}`);
+  throw new GhError(r.status, body);
+}
+
 export async function addLabelsToPr(repo: string, num: number, labels: string[], token: string, log: Logger): Promise<void> {
   if (labels.length === 0) return;
   const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/labels`, {

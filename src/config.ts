@@ -27,6 +27,10 @@ export interface LabelOptions {
 export interface PrMinderConfig {
   triggers: TriggerCondition[]; // ORed; keys within each object are ANDed
   labels: Record<string, LabelOptions>;
+  // When true, re-trigger CI for PRs opened by github-actions[bot]. Such PRs are created
+  // with the default GITHUB_TOKEN, which by design never triggers their own workflows;
+  // pr-minder closes+reopens them with its App token so the workflows actually run.
+  autoTriggerWorkflows: boolean;
 }
 
 const PER_REPO_CONFIG = '.github/pr-minder.jsonc';
@@ -34,7 +38,7 @@ const ORG_CONFIG = '.github/config/pr-minder/pr-minder.jsonc';
 
 export const DEFAULT_LABEL_COLOR = '00FF00';
 
-const DISABLED: PrMinderConfig = { triggers: [], labels: {} };
+const DISABLED: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false };
 
 export async function loadConfig(owner: string, repo: string, token: string, log: Logger): Promise<PrMinderConfig> {
   try {
@@ -63,11 +67,14 @@ function defaultLabel(): LabelOptions {
 }
 
 export function mergeConfig(top: any, override: any): PrMinderConfig {
-  const result: PrMinderConfig = { triggers: [], labels: {} };
+  const result: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false };
   for (const src of [top, override]) {
     if (!src) continue;
     if (src.auto_update_pr && Array.isArray(src.auto_update_pr.triggers)) {
       result.triggers = src.auto_update_pr.triggers as TriggerCondition[];
+    }
+    if (typeof src.auto_trigger_workflows === 'boolean') {
+      result.autoTriggerWorkflows = src.auto_trigger_workflows;
     }
     if (src.auto_label_pr && typeof src.auto_label_pr === 'object') {
       for (const [name, raw] of Object.entries(src.auto_label_pr as Record<string, any>)) {

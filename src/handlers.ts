@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, gh } from './github';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -77,6 +77,17 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
 
   if (action === 'opened') {
     await applyAutoAddLabels(repo, pr, config, token, log);
+
+    // Revive a "zombie" PR: one opened by github-actions[bot] (i.e. created with the
+    // default GITHUB_TOKEN) never triggered its own workflows, because GitHub suppresses
+    // recursive runs from that token. Closing+reopening with our App token fires a fresh
+    // `pull_request.reopened` event, which runs the workflows. The reopened event re-enters
+    // onPR but won't re-trigger (action !== 'opened'), so this can't loop.
+    if (config.autoTriggerWorkflows && isActionsBotPr(pr)) {
+      log.log(`${tag}: zombie PR by github-actions[bot]; re-triggering workflows (close+reopen)`);
+      await retriggerWorkflows(repo, pr.number, token, log);
+      return;
+    }
   }
 
   // Sync label ↔ GitHub native auto-merge (bidirectional).
@@ -221,6 +232,14 @@ async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinde
     log.log(`${tag}: removeLabel "${labelName}" (auto_merge_disabled)`);
     await removeLabelFromPr(repo, pr.number, labelName, token, log);
   }
+}
+
+// A PR authored by github-actions[bot] was created with the default GITHUB_TOKEN, whose
+// events never trigger workflow runs (GitHub's recursion guard). That author is the precise
+// signal that the PR's own CI never ran: PRs created via a PAT or another App token carry
+// that account's identity instead and trigger workflows normally.
+export function isActionsBotPr(pr: any): boolean {
+  return pr?.user?.login === 'github-actions[bot]';
 }
 
 async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<boolean> {
