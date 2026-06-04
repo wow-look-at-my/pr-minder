@@ -4,6 +4,10 @@
 import { handle } from './handlers';
 import { GhError } from './github';
 import { Logger } from './logger';
+import { verifyWebhook } from './webhook';
+// Docs are gzipped at build time and served pre-compressed (see serveDocs).
+import indexHtmlGz from './docs/index.html.gz';
+import llmsTxtGz from './docs/llms.txt.gz';
 
 export interface Env {
   GITHUB_APP_ID: string;
@@ -13,6 +17,8 @@ export interface Env {
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    // GitHub delivers webhooks via POST; GET serves the public documentation.
+    if (req.method === 'GET' || req.method === 'HEAD') return serveDocs(req);
     if (req.method !== 'POST') return new Response('nope', { status: 405 });
 
     const body = await req.text();
@@ -36,16 +42,28 @@ export default {
   },
 };
 
-export async function verifyWebhook(secret: string, sigHeader: string, body: string): Promise<boolean> {
-  const expected = sigHeader.replace(/^sha256=/, '');
-  if (expected.length !== 64) return false;
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify'],
-  );
-  const sigBytes = new Uint8Array(expected.match(/.{2}/g)!.map((h) => parseInt(h, 16)));
-  return crypto.subtle.verify('HMAC', key, sigBytes, new TextEncoder().encode(body));
+// Public docs: a human-readable HTML page at `/` (it fetches and renders /llms.txt) and the
+// llms.txt source at `/llms.txt`. Both are gzipped into the bundle at build time.
+function serveDocs(req: Request): Response {
+  const { pathname } = new URL(req.url);
+  if (pathname === '/') return docs(req, indexHtmlGz, 'text/html; charset=utf-8');
+  if (pathname === '/llms.txt') return docs(req, llmsTxtGz, 'text/plain; charset=utf-8');
+  return new Response('not found', { status: 404 });
+}
+
+// The docs are stored gzipped. For a client that accepts gzip (virtually all of them) we ship
+// the bytes as-is -- `encodeBody: "manual"` tells the runtime the body is already gzip-encoded,
+// so it isn't recompressed on every request. For a client that doesn't advertise gzip we
+// decompress server-side and serve identity, so we never send an encoding it didn't ask for.
+function docs(req: Request, gz: ArrayBuffer, contentType: string): Response {
+  const headers: Record<string, string> = {
+    'content-type': contentType,
+    'cache-control': 'public, max-age=3600',
+    'vary': 'Accept-Encoding',
+  };
+  if ((req.headers.get('accept-encoding') ?? '').includes('gzip')) {
+    return new Response(gz, { encodeBody: 'manual', headers: { ...headers, 'content-encoding': 'gzip' } });
+  }
+  const identity = new Response(gz).body!.pipeThrough(new DecompressionStream('gzip'));
+  return new Response(identity, { headers });
 }

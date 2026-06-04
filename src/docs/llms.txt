@@ -1,0 +1,144 @@
+# pr-minder
+
+> pr-minder is a GitHub App (running as a Cloudflare Worker) that keeps pull requests healthy with zero per-repo workflow files. It keeps PR branches up to date with their base, syncs labels with GitHub's native auto-merge, revives "zombie" PRs whose CI never ran, and opens PRs for forgotten branches. It is opt-in and purely event-driven (no database, no cron).
+
+## Install
+
+Install the GitHub App here: https://github.com/apps/pr-minder/installations/new
+
+Pick "All repositories" or a selected set. pr-minder does nothing until you add a config file, so installing it is safe — every behavior is opt-in.
+
+## How it works
+
+pr-minder receives GitHub webhooks (`pull_request`, `pull_request_review`, `push`, `installation`, `installation_repositories`). For each event it verifies the signature, mints a short-lived installation token, loads your config, and takes the configured actions through the GitHub REST and GraphQL APIs. There is no stored state.
+
+Because it acts with the App's own credentials (not a workflow's default `GITHUB_TOKEN`), the PRs it creates and reopens trigger their workflows normally — which is the basis of the zombie-PR features below.
+
+## Configuration
+
+Config files are JSONC — `//` line comments and `/* */` block comments are allowed.
+
+pr-minder resolves config in this order (first match wins):
+
+1. `<repo>/.github/pr-minder.jsonc` — per-repo config (highest priority).
+2. `<org>/.github` repo, at `.github/config/pr-minder/pr-minder.jsonc` — org-wide defaults. Per-repo overrides go under `repos.<repo-name>`; top-level keys are the org default.
+3. No config found — everything is disabled.
+
+Add the schema for editor validation and autocomplete:
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json"
+}
+```
+
+There is no global "enabled" switch. A feature is on only when its section is present and configured; "disable" means removing the section (or setting `auto_open_pr.enabled` / `auto_trigger_workflows` to `false`, or leaving `auto_update_pr.triggers` empty).
+
+### auto_update_pr — keep PR branches up to date
+
+`auto_update_pr.triggers` is a list of condition objects. When **any** condition is satisfied, pr-minder updates the PR branch with its base (GitHub's "Update branch"). Keys **within** one condition are ANDed; multiple conditions in the array are ORed. Updating is re-evaluated on PR events, on approving reviews, and on every push to the default branch.
+
+| Key | Meaning |
+|-----|---------|
+| `label` | PR has this label. |
+| `approved_by` | PR is approved by at least one of these usernames. |
+| `min_approvals` | PR has at least this many approvals (from anyone). |
+
+```jsonc
+{
+  "auto_update_pr": {
+    "triggers": [
+      { "label": "automerge" },
+      { "approved_by": ["alice", "bob"], "min_approvals": 2 }
+    ]
+  }
+}
+```
+
+### auto_label_pr — labels, auto-update, and auto-merge
+
+A map of label name to per-label settings:
+
+| Field | Meaning |
+|-------|---------|
+| `auto_add` | `"on_pr_creation"` applies the label when a PR is opened; `false` (default) disables. |
+| `create_label_if_missing_in_repo` | `true` creates the label in the repo (using `color`) if it doesn't exist. |
+| `color` | 6-digit hex, with or without a leading `#` (default `00FF00`). |
+| `mode` | `"auto_update"`: keep the PR branch in sync with base whenever this label is present. `"auto_merge"`: bidirectionally sync this label with GitHub's native auto-merge. |
+| `auto_merge_method` | `"merge"`, `"squash"` (default), or `"rebase"`. Only used with `mode: "auto_merge"`. |
+
+With `mode: "auto_merge"`, adding the label arms GitHub's native auto-merge and removing it disarms it; toggling auto-merge from the GitHub UI adds/removes the label to match. If the PR is already mergeable (GitHub refuses to arm auto-merge on a "clean" PR), pr-minder merges it directly using `auto_merge_method`. Branch protection still gates every merge.
+
+```jsonc
+{
+  "auto_label_pr": {
+    "automerge": { "mode": "auto_merge", "auto_merge_method": "squash", "create_label_if_missing_in_repo": true, "color": "0e8a16" },
+    "auto-update": { "mode": "auto_update", "auto_add": "on_pr_creation", "create_label_if_missing_in_repo": true }
+  }
+}
+```
+
+### auto_trigger_workflows — revive "zombie" PRs
+
+`auto_trigger_workflows` is a boolean (default `false`).
+
+A PR created with a workflow's default `GITHUB_TOKEN` (author `github-actions[bot]`) never triggers its own workflows — GitHub suppresses those runs to prevent recursion — so it sits open with no CI and can never go green. pr-minder revives these by closing and reopening the PR with its own App credentials, which fires a fresh `pull_request.reopened` event that runs the workflows for real.
+
+- On the `opened` event it revives PRs authored by `github-actions[bot]` (a brand-new PR has no runs yet, so the author is the reliable signal).
+- On the `reopened` event it revives any open PR that still has zero workflow runs, whatever its author.
+
+It will not loop: pr-minder's own reopen comes back as a `reopened` event sent by a bot, which is skipped.
+
+```jsonc
+{ "auto_trigger_workflows": true }
+```
+
+### auto_open_pr — open PRs for forgotten branches
+
+`auto_open_pr` opens a PR for any branch that is ahead of its base and has no open PR, **using pr-minder's App credentials** so the PR triggers its workflows normally (it is never a zombie). This is the root-cause fix for the "a CI job opened a PR with `GITHUB_TOKEN` and CI never ran" problem.
+
+| Field | Meaning |
+|-------|---------|
+| `enabled` | Turn the feature on (default `false`). |
+| `skip_branches` | Extra branch names to never open PRs for. The default branch and `gh-pages` are always skipped. |
+| `target_base` | Base branch for opened PRs (default: the repo's default branch). |
+
+It runs on a push to a non-default branch (opening the PR as soon as the branch gets a commit) and sweeps existing branches once when the App is installed or repositories are added. Fork branches are not opened.
+
+```jsonc
+{
+  "auto_open_pr": {
+    "enabled": true,
+    "skip_branches": ["staging"],
+    "target_base": ""
+  }
+}
+```
+
+## Org-wide config with per-repo overrides
+
+In the `<org>/.github` repo at `.github/config/pr-minder/pr-minder.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
+  "auto_update_pr": { "triggers": [{ "label": "automerge" }] },
+  "auto_trigger_workflows": true,
+  "repos": {
+    "special-repo": {
+      "auto_update_pr": { "triggers": [{ "label": "ready-to-merge" }] }
+    },
+    "opt-out-repo": {
+      "auto_update_pr": { "triggers": [] }
+    }
+  }
+}
+```
+
+In overrides, `auto_update_pr` replaces the parent's entirely; `auto_label_pr` and `auto_open_pr` merge field-by-field.
+
+## Links
+
+- Install: https://github.com/apps/pr-minder/installations/new
+- Source code: https://github.com/wow-look-at-my/pr-minder
+- Config JSON Schema: https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json

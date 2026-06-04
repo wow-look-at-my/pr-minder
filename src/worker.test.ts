@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { verifyWebhook } from './worker';
+import { verifyWebhook } from './webhook';
 
 async function makeSignature(secret: string, body: string): Promise<string> {
   const key = await crypto.subtle.importKey(

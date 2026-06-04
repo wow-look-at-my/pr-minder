@@ -12,6 +12,8 @@
     },
     "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
     "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" },
+    "auto_trigger_workflows": { "$ref": "#/$defs/autoTriggerWorkflows" },
+    "auto_open_pr": { "$ref": "#/$defs/autoOpenPr" },
     "repos": {
       "description": "Per-repo config overrides. Only meaningful in the org-level .github/config/pr-minder/pr-minder.jsonc; ignored in per-repo config files.",
       "type": "object",
@@ -52,6 +54,33 @@
           "description": "List of trigger conditions (ORed). Keys within a condition are ANDed.",
           "type": "array",
           "items": { "$ref": "#/$defs/triggerCondition" }
+        }
+      }
+    },
+    "autoTriggerWorkflows": {
+      "description": "Re-trigger CI for 'zombie' PRs that have no workflow runs of their own. A PR created with the default GITHUB_TOKEN (author github-actions[bot]) never triggers its workflows (GitHub suppresses recursive runs); on the `opened` event pr-minder revives those. On the `reopened` event it revives any open PR that still has zero workflow runs, whatever its author. The fix is a close+reopen with the App's own credentials, which fires a fresh `pull_request.reopened` event that runs the workflows. Opt-in; defaults to false.",
+      "type": "boolean",
+      "default": false
+    },
+    "autoOpenPr": {
+      "description": "Automatically open a pull request for any branch that is ahead of its base and has no open PR. PRs are opened with pr-minder's own App credentials, so (unlike PRs created by a workflow's default GITHUB_TOKEN) they trigger their workflows normally and are never 'zombie' PRs. Fires on a push to a non-default branch, and sweeps existing branches when the App is installed or repositories are added. The default branch and gh-pages are always skipped.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Turn the feature on. Opt-in; defaults to false.",
+          "type": "boolean",
+          "default": false
+        },
+        "skip_branches": {
+          "description": "Additional branch names to never open PRs for. The default branch and gh-pages are always skipped regardless.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "target_base": {
+          "description": "Base branch for opened PRs. Defaults to the repository's default branch.",
+          "type": "string"
         }
       }
     },
@@ -101,7 +130,9 @@
           "type": "string"
         },
         "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
-        "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" }
+        "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" },
+        "auto_trigger_workflows": { "$ref": "#/$defs/autoTriggerWorkflows" },
+        "auto_open_pr": { "$ref": "#/$defs/autoOpenPr" }
       }
     }
   }

@@ -1,3 +1,5 @@
 node_modules/
 .wrangler/
 dist/
+# Gzipped docs are generated at build time (scripts/build-docs.mjs), never committed.
+src/docs/*.gz

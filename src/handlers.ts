@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, compareCommits, hasOpenPrForBranch, listBranches, getDefaultBranch, createPull, gh } from './github';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -27,8 +27,11 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
   if (event === 'pull_request_review' && action === 'submitted' && p.review?.state === 'approved') {
     return onPR(p, env, log);
   }
-  if (event === 'push' && p.ref === `refs/heads/${p.repository.default_branch}`) {
-    return onPushToDefault(p, env, log);
+  if (event === 'push' && typeof p.ref === 'string' && p.ref.startsWith('refs/heads/') && !p.deleted) {
+    if (p.ref === `refs/heads/${p.repository.default_branch}`) {
+      return onPushToDefault(p, env, log);
+    }
+    return onPushToBranch(p, env, log);
   }
   if (event === 'installation' && (action === 'created' || action === 'new_permissions_accepted')) {
     return onInstallation(p, env, log);
@@ -77,6 +80,18 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
 
   if (action === 'opened') {
     await applyAutoAddLabels(repo, pr, config, token, log);
+  }
+
+  // Revive a "zombie" PR — one with no workflow runs of its own. A PR created with the
+  // default GITHUB_TOKEN (author github-actions[bot]) is the classic case: GitHub suppresses
+  // its workflows to avoid recursion. Closing+reopening with our App token fires a fresh
+  // `pull_request.reopened` event (a default activity type) that DOES run them.
+  if (config.autoTriggerWorkflows && (action === 'opened' || action === 'reopened')) {
+    if (await needsWorkflowTrigger(p, action, repo, pr, token, log)) {
+      log.log(`${tag}: zombie PR with no workflow runs; re-triggering (close+reopen)`);
+      await retriggerWorkflows(repo, pr.number, token, log);
+      return;
+    }
   }
 
   // Sync label ↔ GitHub native auto-merge (bidirectional).
@@ -142,6 +157,56 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   }
 }
 
+// A push to a non-default branch: if auto_open_pr is on, open a PR for that branch when it's
+// ahead of base and doesn't already have one. Opening it with our App token (not the pushing
+// workflow's GITHUB_TOKEN) means the PR triggers its workflows normally — it's never a zombie.
+async function onPushToBranch(p: any, env: Env, log: Logger): Promise<void> {
+  const repo = p.repository.full_name;
+  const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  const [owner, name] = repo.split('/');
+  const config = await loadConfig(owner, name, token, log);
+  if (!config.autoOpenPr.enabled) {
+    log.log(`${repo}: skip (auto_open_pr disabled)`);
+    return;
+  }
+  const branch = p.ref.slice('refs/heads/'.length);
+  const base = config.autoOpenPr.targetBase || p.repository.default_branch;
+  await maybeOpenPrForBranch(repo, branch, base, config, token, log);
+}
+
+// The default branch and gh-pages are always skipped; the config can skip more.
+export function shouldSkipBranch(branch: string, base: string, skipBranches: string[]): boolean {
+  return new Set<string>(['gh-pages', base, ...skipBranches]).has(branch);
+}
+
+async function maybeOpenPrForBranch(repo: string, branch: string, base: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  const tag = `${repo}@${branch}`;
+  if (shouldSkipBranch(branch, base, config.autoOpenPr.skipBranches)) {
+    log.log(`${tag}: skip (excluded branch)`);
+    return;
+  }
+  const cmp = await compareCommits(repo, base, branch, token, log);
+  if (!cmp) { log.log(`${tag}: skip (compare failed)`); return; }
+  if (cmp.ahead_by === 0) { log.log(`${tag}: skip (not ahead of ${base})`); return; }
+  if (await hasOpenPrForBranch(repo, branch, token, log)) { log.log(`${tag}: skip (PR already open)`); return; }
+
+  const num = await createPull(repo, branch, base, branch, `Automated PR for branch \`${branch}\`.`, token, log);
+  if (num !== null) log.log(`${tag}: opened PR #${num} -> ${base}`);
+}
+
+// Catch-up sweep run when the App is installed or repos are added: open PRs for branches that
+// already exist (and are ahead of base with no PR). Going forward, per-branch pushes cover the rest.
+async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  if (!config.autoOpenPr.enabled) return;
+  const base = config.autoOpenPr.targetBase || (await getDefaultBranch(repo, token, log));
+  if (!base) { log.log(`${repo}: skip auto_open_pr sweep (no base branch)`); return; }
+  const branches = await listBranches(repo, token, log);
+  log.log(`${repo}: auto_open_pr sweep over ${branches.length} branches`);
+  for (const branch of branches) {
+    await maybeOpenPrForBranch(repo, branch, base, config, token, log);
+  }
+}
+
 async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
   const repos = await listInstallationRepos(token, log);
@@ -151,6 +216,7 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(fullName, config, token, log);
+      await maybeOpenPrsForRepo(fullName, config, token, log);
       labelCheckedAt.set(fullName, Date.now());
     } catch (e) {
       log.log(`installation: ${fullName}: ${(e as Error).message}`);
@@ -167,6 +233,7 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(repo.full_name, config, token, log);
+      await maybeOpenPrsForRepo(repo.full_name, config, token, log);
       labelCheckedAt.set(repo.full_name, Date.now());
     } catch (e) {
       log.log(`repos_added: ${repo.full_name}: ${(e as Error).message}`);
@@ -221,6 +288,31 @@ async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinde
     log.log(`${tag}: removeLabel "${labelName}" (auto_merge_disabled)`);
     await removeLabelFromPr(repo, pr.number, labelName, token, log);
   }
+}
+
+// A PR authored by github-actions[bot] was created with the default GITHUB_TOKEN, whose
+// events never trigger workflow runs (GitHub's recursion guard). That author is the precise
+// signal that the PR's own CI never ran: PRs created via a PAT or another App token carry
+// that account's identity instead and trigger workflows normally.
+export function isActionsBotPr(pr: any): boolean {
+  return pr?.user?.login === 'github-actions[bot]';
+}
+
+// Decide whether a just-opened or reopened PR needs its workflows kicked off.
+//
+// `opened`: the PR is brand new, so EVERY PR momentarily has zero runs — an empty run list
+// can't tell a zombie from a healthy PR whose runs haven't registered yet. The only race-free
+// signal is the author: github-actions[bot] means it was created with the default GITHUB_TOKEN,
+// whose events GitHub refuses to let trigger workflows.
+//
+// `reopened`: the PR isn't fresh, so an empty run list is trustworthy — trigger any PR that
+// still has no runs, whatever its author. Reopens performed by a bot (our own close+reopen, or
+// another GITHUB_TOKEN actor) are skipped via the sender, so our reopen can't loop.
+async function needsWorkflowTrigger(p: any, action: string, repo: string, pr: any, token: string, log: Logger): Promise<boolean> {
+  if (action === 'opened') return isActionsBotPr(pr);
+  if (p.sender?.type === 'Bot') return false;
+  if (!pr.head?.sha) return false;
+  return !(await hasWorkflowRuns(repo, pr.head.sha, token, log));
 }
 
 async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<boolean> {

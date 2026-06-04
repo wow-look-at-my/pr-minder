@@ -56,6 +56,100 @@ export async function updateBranch(repo: string, num: number, token: string, log
   throw new GhError(r.status, body);
 }
 
+// A PR opened with the default GITHUB_TOKEN (author github-actions[bot]) never triggers
+// its own workflows: GitHub suppresses runs from that token to prevent recursion. Closing
+// and reopening the PR with a *different* credential — our App's installation token — fires
+// a fresh `pull_request.reopened` event (a default activity type), which DOES run the
+// `on: pull_request` workflows. This is GitHub's documented workaround for a "zombie" PR
+// that has no CI, and needs only pull_requests:write (which the App already holds).
+export async function retriggerWorkflows(repo: string, num: number, token: string, log: Logger): Promise<void> {
+  await setPullState(repo, num, 'closed', token, log);
+  await setPullState(repo, num, 'open', token, log);
+  log.log(`retriggerWorkflows ${repo}#${num}: closed+reopened to trigger workflows`);
+}
+
+async function setPullState(repo: string, num: number, state: 'open' | 'closed', token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+    method: 'PATCH',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ state }),
+  });
+  if (r.ok) { log.log(`setPullState ${repo}#${num}: ${state}`); return; }
+  const body = await r.text();
+  log.log(`setPullState ${repo}#${num} -> ${state}: ${r.status} ${body}`);
+  throw new GhError(r.status, body);
+}
+
+// Does the PR's head commit have any GitHub Actions workflow runs? Distinguishes a genuine
+// "zombie" PR (created by a workflow's GITHUB_TOKEN, so its workflows never fired) from one
+// whose CI has already run. On a query error we assume runs exist, so a transient failure
+// can never trigger a spurious close+reopen.
+export async function hasWorkflowRuns(repo: string, headSha: string, token: string, log: Logger): Promise<boolean> {
+  const r = await gh(`/repos/${repo}/actions/runs?head_sha=${headSha}&per_page=1`, token, log);
+  if (!r.ok) return true;
+  const data: any = await r.json();
+  return (data.total_count ?? 0) > 0;
+}
+
+// `${base}...${head}` commit comparison. Returns null on error (caller skips). Branch names
+// keep their slashes in the path; git ref rules forbid the characters that would need encoding.
+export async function compareCommits(repo: string, base: string, head: string, token: string, log: Logger): Promise<{ ahead_by: number; behind_by: number } | null> {
+  const r = await gh(`/repos/${repo}/compare/${base}...${head}`, token, log);
+  if (!r.ok) return null;
+  const data: any = await r.json();
+  return { ahead_by: data.ahead_by ?? 0, behind_by: data.behind_by ?? 0 };
+}
+
+export async function hasOpenPrForBranch(repo: string, branch: string, token: string, log: Logger): Promise<boolean> {
+  const [owner] = repo.split('/');
+  const r = await gh(`/repos/${repo}/pulls?head=${owner}:${encodeURIComponent(branch)}&state=open&per_page=1`, token, log);
+  // Fail safe to "exists" on error so a transient failure never opens a duplicate PR.
+  if (!r.ok) return true;
+  const data: any[] = await r.json();
+  return data.length > 0;
+}
+
+export async function listBranches(repo: string, token: string, log: Logger): Promise<string[]> {
+  const names: string[] = [];
+  let page = 1;
+  for (;;) {
+    const r = await gh(`/repos/${repo}/branches?per_page=100&page=${page}`, token, log);
+    if (!r.ok) break;
+    const data: any[] = await r.json();
+    for (const b of data) names.push(b.name);
+    if (data.length < 100) break;
+    page++;
+  }
+  return names;
+}
+
+export async function getDefaultBranch(repo: string, token: string, log: Logger): Promise<string | null> {
+  const r = await gh(`/repos/${repo}`, token, log);
+  if (!r.ok) return null;
+  const data: any = await r.json();
+  return data.default_branch ?? null;
+}
+
+// Opens a PR head->base. Returns the new PR number, or null when GitHub declines for a
+// non-retryable reason (422: no commits between base and head, or a PR already exists).
+export async function createPull(repo: string, head: string, base: string, title: string, body: string, token: string, log: Logger): Promise<number | null> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+    method: 'POST',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ head, base, title, body }),
+  });
+  if (r.ok) {
+    const data: any = await r.json();
+    log.log(`createPull ${repo} ${head}->${base}: #${data.number}`);
+    return data.number;
+  }
+  const text = await r.text();
+  log.log(`createPull ${repo} ${head}->${base}: ${r.status} ${text}`);
+  // 5xx is transient — throw so GitHub redelivers. 422/4xx are non-retryable — log and move on.
+  if (r.status >= 500) throw new GhError(r.status, text);
+  return null;
+}
+
 export async function addLabelsToPr(repo: string, num: number, labels: string[], token: string, log: Logger): Promise<void> {
   if (labels.length === 0) return;
   const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/labels`, {
