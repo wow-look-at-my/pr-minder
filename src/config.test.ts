@@ -3,7 +3,12 @@ import { mergeConfig, DEFAULT_LABEL_COLOR } from './config';
 
 describe('mergeConfig', () => {
   it('returns empty triggers and labels when top has no known fields', () => {
-    expect(mergeConfig({}, null)).toEqual({ triggers: [], labels: {}, autoTriggerWorkflows: false });
+    expect(mergeConfig({}, null)).toEqual({
+      triggers: [],
+      labels: {},
+      autoTriggerWorkflows: false,
+      autoOpenPr: { enabled: false, skipBranches: [], targetBase: '' },
+    });
   });
 
   it('null override is a no-op', () => {
@@ -67,6 +72,42 @@ describe('mergeConfig', () => {
     it('an override that omits the field keeps the top-level value', () => {
       const cfg = mergeConfig({ auto_trigger_workflows: true }, { auto_label_pr: { foo: {} } });
       expect(cfg.autoTriggerWorkflows).toBe(true);
+    });
+  });
+
+  describe('auto_open_pr', () => {
+    it('defaults to disabled with empty skip list and base', () => {
+      expect(mergeConfig({}, null).autoOpenPr).toEqual({ enabled: false, skipBranches: [], targetBase: '' });
+    });
+
+    it('parses enabled, skip_branches and target_base', () => {
+      const cfg = mergeConfig({
+        auto_open_pr: { enabled: true, skip_branches: ['staging', 'release'], target_base: 'develop' },
+      }, null);
+      expect(cfg.autoOpenPr).toEqual({ enabled: true, skipBranches: ['staging', 'release'], targetBase: 'develop' });
+    });
+
+    it('drops non-string entries from skip_branches', () => {
+      const cfg = mergeConfig({ auto_open_pr: { enabled: true, skip_branches: ['ok', 3, null] } }, null);
+      expect(cfg.autoOpenPr.skipBranches).toEqual(['ok']);
+    });
+
+    it('ignores a non-boolean enabled', () => {
+      const cfg = mergeConfig({ auto_open_pr: { enabled: 'yes' } }, null);
+      expect(cfg.autoOpenPr.enabled).toBe(false);
+    });
+
+    it('a per-repo override can enable it', () => {
+      const cfg = mergeConfig({}, { auto_open_pr: { enabled: true } });
+      expect(cfg.autoOpenPr.enabled).toBe(true);
+    });
+
+    it('a per-repo override merges field-by-field over the top-level', () => {
+      const cfg = mergeConfig(
+        { auto_open_pr: { enabled: true, target_base: 'main' } },
+        { auto_open_pr: { skip_branches: ['wip'] } },
+      );
+      expect(cfg.autoOpenPr).toEqual({ enabled: true, skipBranches: ['wip'], targetBase: 'main' });
     });
   });
 

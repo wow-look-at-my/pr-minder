@@ -63,6 +63,7 @@ Top-level sections:
 - `auto_update_pr.triggers` — array of condition objects. Keys within one object are ANDed; multiple objects are ORed.
 - `auto_label_pr` — map of label name to per-label settings.
 - `auto_trigger_workflows` — boolean. Re-trigger CI for PRs opened by `github-actions[bot]` (see [Re-triggering CI for bot-created PRs](#re-triggering-ci-for-bot-created-prs)). Defaults to `false`.
+- `auto_open_pr` — object. Open PRs for forgotten branches, born with CI already running (see [Auto-opening PRs for forgotten branches](#auto-opening-prs-for-forgotten-branches)). Defaults to disabled.
 
 **Per-repo** (`.github/pr-minder.jsonc`):
 ```jsonc
@@ -139,6 +140,36 @@ Notes:
 - **Opt-in**, off by default.
 - **No loop.** The close+reopen we perform comes back as a `reopened` event whose `sender` is the App's own bot; reopens from any bot sender are skipped, so it can't cycle. If a query for existing runs fails, pr-minder assumes runs exist and does nothing — a transient error never causes a spurious reopen.
 - No extra permissions are needed — close/reopen uses the same `pull_requests: write` the App already requires.
+
+## Auto-opening PRs for forgotten branches
+
+The cleanest way to avoid zombie PRs is to never create one. A common source is a CI job that opens PRs for branches using the workflow's default `GITHUB_TOKEN` — every such PR is born a zombie. `auto_open_pr` moves that job into pr-minder, which opens the PR with its **App credentials** instead, so the PR triggers its workflows normally from the start. No close/reopen required.
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
+  "auto_open_pr": {
+    "enabled": true,
+    // Optional: branches to never open PRs for (the default branch and gh-pages are always skipped).
+    "skip_branches": ["staging"],
+    // Optional: base for opened PRs (defaults to the repo's default branch).
+    "target_base": ""
+  }
+}
+```
+
+When a branch is ahead of its base and has no open PR, pr-minder opens one (`head` = the branch, `base` = `target_base` or the default branch, title = the branch name). It runs on two triggers:
+
+- **On a push to a non-default branch** — opens the PR the moment the branch gets a commit, going forward.
+- **On install / repos-added** — sweeps existing branches once, so branches that predate the App also get PRs.
+
+Notes:
+- **Opt-in**, off by default. The default branch and `gh-pages` are always skipped; add more via `skip_branches`.
+- The PR is opened by the App, so its author is the App's bot (not `github-actions[bot]`) and `auto_trigger_workflows` correctly leaves it alone — it isn't a zombie.
+- Branches with no commits ahead of base, or that already have an open PR, are skipped. Fork branches aren't opened (the head must be in this repo).
+- Needs only the `pull_requests: write` / `contents: read` the App already has.
+
+This replaces the "open PRs for branches missing one" job people often run as a GitHub Actions workflow — and fixes its core flaw (PRs opened with `GITHUB_TOKEN` never run their own CI).
 
 ## Local development
 

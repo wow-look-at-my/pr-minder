@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { conditionMet, isActionsBotPr } from './handlers';
+import { conditionMet, isActionsBotPr, shouldSkipBranch } from './handlers';
 
 const noApprovers = async () => new Set<string>();
 const approvers = (...names: string[]) => async () => new Set(names);
@@ -85,5 +85,21 @@ describe('isActionsBotPr', () => {
   it('is false when the author is missing', () => {
     expect(isActionsBotPr({})).toBe(false);
     expect(isActionsBotPr(undefined)).toBe(false);
+  });
+});
+
+describe('shouldSkipBranch', () => {
+  it('always skips the base branch and gh-pages', () => {
+    expect(shouldSkipBranch('main', 'main', [])).toBe(true);
+    expect(shouldSkipBranch('gh-pages', 'main', [])).toBe(true);
+  });
+
+  it('skips branches in the configured skip list', () => {
+    expect(shouldSkipBranch('staging', 'main', ['staging', 'release'])).toBe(true);
+    expect(shouldSkipBranch('release', 'main', ['staging', 'release'])).toBe(true);
+  });
+
+  it('does not skip an ordinary feature branch', () => {
+    expect(shouldSkipBranch('feature/x', 'main', ['staging'])).toBe(false);
   });
 });

@@ -7,7 +7,7 @@ Cloudflare Worker (TypeScript) that acts as a GitHub App webhook handler for kee
 ```
 src/
   worker.ts     Entry point: Cloudflare Worker fetch handler + webhook HMAC verification
-  handlers.ts   Event dispatch: handle(), onPR(), onPushToDefault(), onInstallation(), onReposAdded(), prQualifies(), isActionsBotPr(), needsWorkflowTrigger()
+  handlers.ts   Event dispatch: handle(), onPR(), onPushToDefault(), onPushToBranch(), onInstallation(), onReposAdded(), prQualifies(), isActionsBotPr(), needsWorkflowTrigger(), shouldSkipBranch()
   config.ts     Config loading: loadConfig(), PrMinderConfig type
   github.ts     GitHub API: auth (JWT/install token), REST helpers
 schema/
@@ -64,6 +64,8 @@ Set via `wrangler secret put <NAME>`:
 
 Loop safety: our own close+reopen returns as a `reopened` event whose `sender.type` is `Bot`; reopens from any bot sender are skipped. `hasWorkflowRuns` fails safe to `true` (assume runs exist) on a query error, so transient failures never cause a spurious reopen.
 
+`auto_open_pr`: `{ enabled, skip_branches[], target_base }` (default disabled). Root-cause fix for zombies: pr-minder itself opens PRs for forgotten branches, using its **App token** so they trigger CI natively (never zombies — complementary to the `auto_trigger_workflows` band-aid). A branch qualifies when it's ahead of base and has no open PR (`compareCommits` + `hasOpenPrForBranch` + `createPull` in `github.ts`; `shouldSkipBranch` always excludes the default branch + gh-pages). Two triggers: `onPushToBranch` (push to a non-default branch) and a sweep (`maybeOpenPrsForRepo`) on `installation`/`installation_repositories` for pre-existing branches. `target_base` defaults to the repo default branch. This replaces the "open PRs for branches missing one" reusable workflow in `wow-look-at-my/actions` (`pr-management.yml`), whose flaw was creating PRs with `github.token`.
+
 There is no top-level `enabled`; "disable" means omitting the relevant label/mode, leaving `triggers` empty, or setting `auto_trigger_workflows: false`.
 
 ## Key invariants
@@ -73,4 +75,5 @@ There is no top-level `enabled`; "disable" means omitting the relevant label/mod
 - `pull_request_review` webhook sends `review.state` lowercase; the reviews REST API returns uppercase `APPROVED` — both cases are handled
 - PRs created via a workflow's default `GITHUB_TOKEN` never trigger their own workflows (GitHub's recursion guard); the author is `github-actions[bot]`. `auto_trigger_workflows` fixes this by close+reopen using the App's installation token (a different credential), which GitHub *does* let trigger workflows. Close+reopen is two `PATCH /repos/{repo}/pulls/{num}` calls (`state: closed` then `state: open`); `closed` is intentionally not a handled action. The retrigger runs on `opened` and `reopened`; the loop guard is the `Bot` sender skip on `reopened` (our own reopen comes back bot-sent), not the event gate
 - GitHub App must subscribe to `pull_request`, `pull_request_review`, and `push` events; `installation` and `installation_repositories` are auto-delivered
+- `push` handling: default-branch pushes → `onPushToDefault` (update qualifying PRs); non-default branch pushes → `onPushToBranch` (`auto_open_pr`). Both gated on `ref` being `refs/heads/*` and `!p.deleted`, so tag pushes and branch deletions are ignored. A PR pr-minder opens is authored by the App's own bot, so it triggers CI natively and the `auto_trigger_workflows` zombie check (which keys on `github-actions[bot]`) correctly ignores it — no interaction between the two features
 - JWT validity window is `iat - 60s` to `exp + 540s` (GitHub allows up to 10 min; we use 9)

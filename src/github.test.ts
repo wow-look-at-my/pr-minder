@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, compareCommits, hasOpenPrForBranch, createPull, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -179,6 +179,61 @@ describe('hasWorkflowRuns', () => {
   it('fails safe to true on a non-2xx, so a transient error never forces a reopen', async () => {
     stubFetch(500, 'boom');
     expect(await hasWorkflowRuns('o/r', 'sha', 'tok', new Logger())).toBe(true);
+  });
+});
+
+describe('compareCommits', () => {
+  it('compares base...head and returns ahead_by/behind_by', async () => {
+    const fetchMock = stubFetch(200, { ahead_by: 2, behind_by: 5 });
+    const cmp = await compareCommits('o/r', 'main', 'feature/x', 'tok', new Logger());
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/compare/main...feature/x');
+    expect(cmp).toEqual({ ahead_by: 2, behind_by: 5 });
+  });
+
+  it('returns null on error', async () => {
+    stubFetch(404, { message: 'Not Found' });
+    expect(await compareCommits('o/r', 'main', 'x', 'tok', new Logger())).toBeNull();
+  });
+});
+
+describe('hasOpenPrForBranch', () => {
+  it('queries open PRs by head owner:branch and is true when one exists', async () => {
+    const fetchMock = stubFetch(200, [{ number: 9 }]);
+    const has = await hasOpenPrForBranch('o/r', 'feature/x', 'tok', new Logger());
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/pulls?head=o:feature%2Fx&state=open&per_page=1');
+    expect(has).toBe(true);
+  });
+
+  it('is false when no open PR exists', async () => {
+    stubFetch(200, []);
+    expect(await hasOpenPrForBranch('o/r', 'b', 'tok', new Logger())).toBe(false);
+  });
+
+  it('fails safe to true on error, so a transient failure never opens a duplicate', async () => {
+    stubFetch(500, 'boom');
+    expect(await hasOpenPrForBranch('o/r', 'b', 'tok', new Logger())).toBe(true);
+  });
+});
+
+describe('createPull', () => {
+  it('POSTs head/base/title/body and returns the new PR number', async () => {
+    const fetchMock = stubFetch(201, { number: 42 });
+    const num = await createPull('o/r', 'feature/x', 'main', 'feature/x', 'body', 'tok', new Logger());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/o/r/pulls');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ head: 'feature/x', base: 'main', title: 'feature/x', body: 'body' });
+    expect(num).toBe(42);
+  });
+
+  it('returns null on a 422 (no commits between base and head, or PR already exists)', async () => {
+    stubFetch(422, { message: 'No commits between main and feature/x' });
+    expect(await createPull('o/r', 'feature/x', 'main', 't', 'b', 'tok', new Logger())).toBeNull();
+  });
+
+  it('throws on 5xx (transient)', async () => {
+    stubFetch(503, 'service unavailable');
+    await expect(createPull('o/r', 'b', 'main', 't', 'b', 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
   });
 });
 
