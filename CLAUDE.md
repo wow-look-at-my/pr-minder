@@ -11,16 +11,18 @@ src/
   handlers.ts   Event dispatch: handle(), onPR(), onPushToDefault(), onPushToBranch(), onInstallation(), onReposAdded(), prQualifies(), isActionsBotPr(), needsWorkflowTrigger(), shouldSkipBranch()
   config.ts     Config loading: loadConfig(), PrMinderConfig type
   github.ts     GitHub API: auth (JWT/install token), REST helpers
-  docs/         Public docs served by the Worker: index.html (GET /) and llms.txt (GET /llms.txt)
-  text-modules.d.ts   Ambient `*.html`/`*.txt` -> string decls (Wrangler bakes these imports into the bundle)
+  docs/         Doc sources: llms.txt (the content) and index.html (a self-contained page that fetches /llms.txt and renders it). *.gz are generated, git-ignored
+  text-modules.d.ts   Ambient `*.gz` -> ArrayBuffer decl for the imported gzip blobs
+scripts/
+  build-docs.mjs          Build step: gzip the doc sources -> src/docs/*.gz (run via wrangler.toml [build].command)
 schema/
   pr-minder.schema.json   JSON Schema for .github/pr-minder.jsonc config files
-wrangler.toml             Worker name, compat date, plain vars (AUTOMERGE_LABEL, GITHUB_APP_ID)
+wrangler.toml             Worker name, compat date, [build] gzip step, [[rules]] Data for *.gz, plain vars (GITHUB_APP_ID)
 ```
 
 ## Docs serving
 
-`worker.ts` serves public documentation on GET/HEAD: `/` -> `docs/index.html`, `/llms.txt` -> `docs/llms.txt`. Both files are imported as strings; Wrangler auto-bundles `.html`/`.txt`/`.sql` as text (no `[[rules]]` needed), so the docs are baked into the Worker at build time — no runtime fetch, no assets binding. Keep doc content in those files (the "no embedded docs in source files" rule); never inline it as a string literal in a `.ts`. The install URL is `https://github.com/apps/pr-minder/installations/new`. Webhooks are POST, so they never collide with the GET docs routes.
+`worker.ts` serves public docs on GET/HEAD: `/` and `/llms.txt`. `llms.txt` is the single source of truth; `index.html` is a self-contained page that fetches `/llms.txt` and renders the Markdown. Both are **gzipped at build time** (`scripts/build-docs.mjs`, wired via `wrangler.toml [build].command`, output git-ignored) and imported as `*.gz` blobs (the `[[rules]] type = "Data"` makes them `ArrayBuffer`). They're served **pre-compressed**: `new Response(gz, { encodeBody: "manual", headers: { "content-encoding": "gzip" } })` — `encodeBody: "manual"` is required, else the runtime compresses the already-gzipped bytes again. Keep doc content in `docs/*` (the "no embedded docs in source files" rule); never inline it in a `.ts`. Install URL: `https://github.com/apps/pr-minder/installations/new`. Webhooks are POST, so they never collide with the GET docs routes. `verifyWebhook` lives in `webhook.ts` so the test suite doesn't pull `worker.ts`'s binary imports through vite.
 
 ## Build / typecheck
 

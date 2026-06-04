@@ -1,10 +1,6 @@
-// Wrangler bundles .html/.txt/.sql imports as strings (baked into the Worker at build time).
-// These ambient declarations let tsc type those imports as `string`.
-declare module '*.html' {
-  const content: string;
-  export default content;
-}
-declare module '*.txt' {
-  const content: string;
+// The docs are gzipped at build time (scripts/build-docs.mjs) and imported as binary
+// blobs. Wrangler's "Data" module rule (wrangler.toml) makes a .gz import an ArrayBuffer.
+declare module '*.gz' {
+  const content: ArrayBuffer;
   export default content;
 }

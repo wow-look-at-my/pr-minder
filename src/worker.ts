@@ -5,8 +5,9 @@ import { handle } from './handlers';
 import { GhError } from './github';
 import { Logger } from './logger';
 import { verifyWebhook } from './webhook';
-import indexHtml from './docs/index.html';
-import llmsTxt from './docs/llms.txt';
+// Docs are gzipped at build time and served pre-compressed (see serveDocs).
+import indexHtmlGz from './docs/index.html.gz';
+import llmsTxtGz from './docs/llms.txt.gz';
 
 export interface Env {
   GITHUB_APP_ID: string;
@@ -41,16 +42,24 @@ export default {
   },
 };
 
-// Public docs: HTML at `/`, llms.txt markdown at `/llms.txt`. Both are baked into the
-// bundle at build time, so serving them is a static, allocation-free string response.
+// Public docs: a human-readable HTML page at `/` (it fetches and renders /llms.txt) and the
+// llms.txt source at `/llms.txt`. Both are gzipped into the bundle at build time and served
+// pre-compressed: `encodeBody: "manual"` tells the runtime the body is already gzip-encoded,
+// so it ships the bytes as-is instead of compressing them again on every request.
 function serveDocs(req: Request): Response {
   const { pathname } = new URL(req.url);
-  const cache = 'public, max-age=3600';
-  if (pathname === '/') {
-    return new Response(indexHtml, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': cache } });
-  }
-  if (pathname === '/llms.txt') {
-    return new Response(llmsTxt, { headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': cache } });
-  }
+  if (pathname === '/') return gzip(indexHtmlGz, 'text/html; charset=utf-8');
+  if (pathname === '/llms.txt') return gzip(llmsTxtGz, 'text/plain; charset=utf-8');
   return new Response('not found', { status: 404 });
+}
+
+function gzip(body: ArrayBuffer, contentType: string): Response {
+  return new Response(body, {
+    encodeBody: 'manual',
+    headers: {
+      'content-type': contentType,
+      'content-encoding': 'gzip',
+      'cache-control': 'public, max-age=3600',
+    },
+  });
 }

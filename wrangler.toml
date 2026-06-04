@@ -2,6 +2,16 @@ name = "pr-minder"
 main = "src/worker.ts"
 compatibility_date = "2026-04-19"
 
+# Gzip the docs sources before bundling; the Worker imports the .gz blobs (Data ->
+# ArrayBuffer) and serves them pre-compressed. Runs locally (wrangler dev) and in
+# Cloudflare Workers Builds (which invokes wrangler), so nothing binary is committed.
+[build]
+command = "node scripts/build-docs.mjs"
+
+[[rules]]
+type = "Data"
+globs = ["**/*.gz"]
+
 [observability]
 enabled = true
 

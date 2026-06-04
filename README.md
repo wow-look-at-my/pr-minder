@@ -4,7 +4,7 @@ A Cloudflare Worker GitHub App that keeps pull requests up to date with their ba
 
 **Install:** https://github.com/apps/pr-minder/installations/new
 
-The deployed Worker also serves its own public docs: HTML at `/` and an LLM-friendly `/llms.txt` (both baked into the bundle at build time).
+The deployed Worker also serves its own public docs: a human-readable page at `/` (which fetches and renders `/llms.txt`) and the LLM-friendly `/llms.txt` itself. Both are gzipped at build time and served pre-compressed.
 
 ## How it works
 

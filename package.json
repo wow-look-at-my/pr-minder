@@ -5,6 +5,7 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
+    "build:docs": "node scripts/build-docs.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
