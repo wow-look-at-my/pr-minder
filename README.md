@@ -2,6 +2,10 @@
 
 A Cloudflare Worker GitHub App that keeps pull requests up to date with their base branch automatically. Reacts to webhooks in ~1s, works across every repo in the org without per-repo setup.
 
+**Install:** https://github.com/apps/pr-minder/installations/new
+
+The deployed Worker also serves its own public docs: HTML at `/` and an LLM-friendly `/llms.txt` (both baked into the bundle at build time).
+
 ## How it works
 
 1. A GitHub App webhook fires on `pull_request`, `pull_request_review`, `push`, `installation`, or `installation_repositories` events

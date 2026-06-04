@@ -6,14 +6,21 @@ Cloudflare Worker (TypeScript) that acts as a GitHub App webhook handler for kee
 
 ```
 src/
-  worker.ts     Entry point: Cloudflare Worker fetch handler + webhook HMAC verification
+  worker.ts     Entry point: Cloudflare Worker fetch handler. GET/HEAD -> serveDocs(); POST -> webhook
+  webhook.ts    verifyWebhook(): HMAC-SHA256 check of x-hub-signature-256 (its own module so tests don't pull in worker.ts's baked-in docs)
   handlers.ts   Event dispatch: handle(), onPR(), onPushToDefault(), onPushToBranch(), onInstallation(), onReposAdded(), prQualifies(), isActionsBotPr(), needsWorkflowTrigger(), shouldSkipBranch()
   config.ts     Config loading: loadConfig(), PrMinderConfig type
   github.ts     GitHub API: auth (JWT/install token), REST helpers
+  docs/         Public docs served by the Worker: index.html (GET /) and llms.txt (GET /llms.txt)
+  text-modules.d.ts   Ambient `*.html`/`*.txt` -> string decls (Wrangler bakes these imports into the bundle)
 schema/
   pr-minder.schema.json   JSON Schema for .github/pr-minder.jsonc config files
 wrangler.toml             Worker name, compat date, plain vars (AUTOMERGE_LABEL, GITHUB_APP_ID)
 ```
+
+## Docs serving
+
+`worker.ts` serves public documentation on GET/HEAD: `/` -> `docs/index.html`, `/llms.txt` -> `docs/llms.txt`. Both files are imported as strings; Wrangler auto-bundles `.html`/`.txt`/`.sql` as text (no `[[rules]]` needed), so the docs are baked into the Worker at build time — no runtime fetch, no assets binding. Keep doc content in those files (the "no embedded docs in source files" rule); never inline it as a string literal in a `.ts`. The install URL is `https://github.com/apps/pr-minder/installations/new`. Webhooks are POST, so they never collide with the GET docs routes.
 
 ## Build / typecheck
 

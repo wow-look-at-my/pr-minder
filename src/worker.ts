@@ -4,6 +4,9 @@
 import { handle } from './handlers';
 import { GhError } from './github';
 import { Logger } from './logger';
+import { verifyWebhook } from './webhook';
+import indexHtml from './docs/index.html';
+import llmsTxt from './docs/llms.txt';
 
 export interface Env {
   GITHUB_APP_ID: string;
@@ -13,6 +16,8 @@ export interface Env {
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    // GitHub delivers webhooks via POST; GET serves the public documentation.
+    if (req.method === 'GET' || req.method === 'HEAD') return serveDocs(req);
     if (req.method !== 'POST') return new Response('nope', { status: 405 });
 
     const body = await req.text();
@@ -36,16 +41,16 @@ export default {
   },
 };
 
-export async function verifyWebhook(secret: string, sigHeader: string, body: string): Promise<boolean> {
-  const expected = sigHeader.replace(/^sha256=/, '');
-  if (expected.length !== 64) return false;
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify'],
-  );
-  const sigBytes = new Uint8Array(expected.match(/.{2}/g)!.map((h) => parseInt(h, 16)));
-  return crypto.subtle.verify('HMAC', key, sigBytes, new TextEncoder().encode(body));
+// Public docs: HTML at `/`, llms.txt markdown at `/llms.txt`. Both are baked into the
+// bundle at build time, so serving them is a static, allocation-free string response.
+function serveDocs(req: Request): Response {
+  const { pathname } = new URL(req.url);
+  const cache = 'public, max-age=3600';
+  if (pathname === '/') {
+    return new Response(indexHtml, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': cache } });
+  }
+  if (pathname === '/llms.txt') {
+    return new Response(llmsTxt, { headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': cache } });
+  }
+  return new Response('not found', { status: 404 });
 }
