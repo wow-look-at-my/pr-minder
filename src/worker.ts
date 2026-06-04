@@ -43,23 +43,27 @@ export default {
 };
 
 // Public docs: a human-readable HTML page at `/` (it fetches and renders /llms.txt) and the
-// llms.txt source at `/llms.txt`. Both are gzipped into the bundle at build time and served
-// pre-compressed: `encodeBody: "manual"` tells the runtime the body is already gzip-encoded,
-// so it ships the bytes as-is instead of compressing them again on every request.
+// llms.txt source at `/llms.txt`. Both are gzipped into the bundle at build time.
 function serveDocs(req: Request): Response {
   const { pathname } = new URL(req.url);
-  if (pathname === '/') return gzip(indexHtmlGz, 'text/html; charset=utf-8');
-  if (pathname === '/llms.txt') return gzip(llmsTxtGz, 'text/plain; charset=utf-8');
+  if (pathname === '/') return docs(req, indexHtmlGz, 'text/html; charset=utf-8');
+  if (pathname === '/llms.txt') return docs(req, llmsTxtGz, 'text/plain; charset=utf-8');
   return new Response('not found', { status: 404 });
 }
 
-function gzip(body: ArrayBuffer, contentType: string): Response {
-  return new Response(body, {
-    encodeBody: 'manual',
-    headers: {
-      'content-type': contentType,
-      'content-encoding': 'gzip',
-      'cache-control': 'public, max-age=3600',
-    },
-  });
+// The docs are stored gzipped. For a client that accepts gzip (virtually all of them) we ship
+// the bytes as-is -- `encodeBody: "manual"` tells the runtime the body is already gzip-encoded,
+// so it isn't recompressed on every request. For a client that doesn't advertise gzip we
+// decompress server-side and serve identity, so we never send an encoding it didn't ask for.
+function docs(req: Request, gz: ArrayBuffer, contentType: string): Response {
+  const headers: Record<string, string> = {
+    'content-type': contentType,
+    'cache-control': 'public, max-age=3600',
+    'vary': 'Accept-Encoding',
+  };
+  if ((req.headers.get('accept-encoding') ?? '').includes('gzip')) {
+    return new Response(gz, { encodeBody: 'manual', headers: { ...headers, 'content-encoding': 'gzip' } });
+  }
+  const identity = new Response(gz).body!.pipeThrough(new DecompressionStream('gzip'));
+  return new Response(identity, { headers });
 }
