@@ -13,6 +13,7 @@ export interface Env {
   GITHUB_APP_ID: string;
   GITHUB_APP_PRIVATE_KEY: string; // PEM, PKCS8
   WEBHOOK_SECRET: string;
+  PR_STATE: KVNamespace; // zombie-check state: per-PR "checked at SHA" + per-repo backfill flag
 }
 
 export default {

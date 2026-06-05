@@ -1,6 +1,7 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
 import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
+import { checkedSha, markChecked, wasBackfilled, markBackfilled } from './state';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -14,10 +15,13 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
   const prNum = p.pull_request?.number;
   log.log(`event=${event} action=${action} repo=${repo} pr=${prNum}`);
 
-  // Opportunistic label check on every event for the source repo, throttled per-repo.
-  // Handlers below that already create labels (installation sweeps) bypass this.
+  // Opportunistic per-repo work on every event for the source repo: ensure labels (throttled),
+  // and backfill the zombie check once (the first time we ever see this repo). This is how a repo
+  // installed before the feature existed gets its pre-existing PRs checked — GitHub never re-sends
+  // its install event, so the repo's next webhook of any kind triggers the one-time sweep.
   if (repo && p.installation?.id) {
     await maybeEnsureLabelsForRepo(repo, p.installation.id, env, log);
+    await maybeBackfillRepo(repo, p.installation.id, env, log);
   }
 
   if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'unlabeled', 'synchronize', 'auto_merge_enabled', 'auto_merge_disabled'].includes(action)) {
@@ -82,16 +86,15 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
     await applyAutoAddLabels(repo, pr, config, token, log);
   }
 
-  // Revive a "zombie" PR — one with no workflow runs of its own. A PR created with the
-  // default GITHUB_TOKEN (author github-actions[bot]) is the classic case: GitHub suppresses
-  // its workflows to avoid recursion. Closing+reopening with our App token fires a fresh
-  // `pull_request.reopened` event (a default activity type) that DOES run them.
-  if (config.autoTriggerWorkflows && (action === 'opened' || action === 'reopened')) {
-    if (await needsWorkflowTrigger(p, action, repo, pr, token, log)) {
-      log.log(`${tag}: zombie PR with no workflow runs; re-triggering (close+reopen)`);
-      await retriggerWorkflows(repo, pr.number, token, log);
-      return;
-    }
+  // Revive a "zombie" PR — author github-actions[bot] with no workflow runs of its own (created
+  // with the default GITHUB_TOKEN, whose events GitHub won't let trigger workflows). Closing+
+  // reopening with our App token fires a fresh event that DOES run them. The KV seen-set keeps this
+  // to once per commit; `synchronize` is included so new commits (a "touch") get re-checked. Skip
+  // reopens we triggered ourselves (Bot sender) so the close+reopen can't loop. If we did reopen,
+  // return — the PR was just closed+reopened, and the fresh event will drive the rest.
+  if (config.autoTriggerWorkflows && ['opened', 'reopened', 'synchronize'].includes(action)
+      && !(action === 'reopened' && p.sender?.type === 'Bot')) {
+    if (await reviveIfZombie(env, repo, pr, token, log)) return;
   }
 
   // Sync label ↔ GitHub native auto-merge (bidirectional).
@@ -207,34 +210,65 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
   }
 }
 
-// Catch-up sweep run when the App is installed or repos are added: revive any pre-existing
-// "zombie" PR — one a CI job opened with the default GITHUB_TOKEN (author github-actions[bot])
-// before pr-minder was watching, so its workflows never fired. Closing+reopening with our App
-// token fires a fresh `pull_request.reopened` event that runs them. Our own reopen returns
-// Bot-sent and is skipped on the live `reopened` path, so the sweep can't loop. Runs BEFORE the
-// auto_open_pr sweep so a PR we open this pass (App-authored, CI fires natively) is never mistaken
-// for a zombie by its momentary zero runs.
+// Evaluate one PR and revive it if it's a GITHUB_TOKEN "zombie": author github-actions[bot] with
+// no workflow runs for its head commit. Closing+reopening with our App token fires a fresh event
+// that DOES run its workflows. Returns true iff it reopened.
 //
-// Rate-limit shape: listOpenPulls already carries each PR's author, so we gate on
-// `isActionsBotPr` (free) and spend the one `hasWorkflowRuns` call ONLY on bot-authored PRs —
-// the sole kind that can be a GITHUB_TOKEN zombie. Cost is ~1 API call per *bot-authored* open
-// PR, not per open PR, which bounds the burst when a large installation is onboarded. (A human-
-// or PAT-authored PR with zero runs means the repo has no PR CI, which a reopen can't fix; the
-// live `reopened` path still handles any author when a human explicitly reopens a single PR.)
-async function maybeRetriggerZombiesForRepo(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+// KV makes this check-once: skip if we've already evaluated this PR at its current head SHA, and
+// record the SHA afterwards — so a new commit (new SHA) is re-checked but an untouched PR never is.
+// Bot-author-gated, so the one hasWorkflowRuns call is spent only on the PR kind that can be a
+// zombie. (A bot PR always has zero runs until revived, which is exactly why zero runs is the right
+// signal here even on a freshly opened/synchronized PR; non-bot PRs return immediately.) Degrades to
+// "always check, never record" if the KV binding is somehow absent, so it never throws on missing KV.
+export async function reviveIfZombie(env: Env, repo: string, pr: any, token: string, log: Logger): Promise<boolean> {
+  const sha = pr?.head?.sha;
+  if (pr?.draft || !sha || !isActionsBotPr(pr)) return false;
+  if (env.PR_STATE && (await checkedSha(env.PR_STATE, repo, pr.number)) === sha) return false;
+
+  let reopened = false;
+  if (!(await hasWorkflowRuns(repo, sha, token, log))) {
+    log.log(`${repo}#${pr.number}: zombie PR with no workflow runs; re-triggering (close+reopen)`);
+    await retriggerWorkflows(repo, pr.number, token, log);
+    reopened = true;
+  }
+  if (env.PR_STATE) await markChecked(env.PR_STATE, repo, pr.number, sha);
+  return reopened;
+}
+
+// Sweep a repo's open PRs through reviveIfZombie. Used by the install/repos-added handlers and the
+// first-webhook backfill. listOpenPulls already carries each PR's author, so we pre-filter to
+// bot-authored candidates (free) before reviveIfZombie spends a KV read / hasWorkflowRuns call —
+// cost is ~1 API call per *bot-authored* open PR not yet checked at its current SHA, so a re-sweep
+// of an already-checked repo is nearly free. Each PR is wrapped so one failure doesn't abort the rest.
+async function maybeRetriggerZombiesForRepo(repo: string, config: PrMinderConfig, token: string, env: Env, log: Logger): Promise<void> {
   if (!config.autoTriggerWorkflows) return;
   const prs = await listOpenPulls(repo, token, log);
   const candidates = prs.filter((pr) => !pr.draft && isActionsBotPr(pr) && pr.head?.sha);
   log.log(`${repo}: zombie sweep over ${prs.length} open PRs (${candidates.length} bot-authored)`);
   for (const pr of candidates) {
-    const tag = `${repo}#${pr.number}`;
     try {
-      if (await hasWorkflowRuns(repo, pr.head.sha, token, log)) continue;
-      log.log(`${tag}: zombie PR with no workflow runs; re-triggering (close+reopen)`);
-      await retriggerWorkflows(repo, pr.number, token, log);
+      await reviveIfZombie(env, repo, pr, token, log);
     } catch (e) {
-      log.log(`${tag}: zombie retrigger failed: ${(e as Error).message}`);
+      log.log(`${repo}#${pr.number}: zombie retrigger failed: ${(e as Error).message}`);
     }
+  }
+}
+
+// First-webhook backfill: the event-driven "check at least once" for repos that were already
+// installed before this feature shipped (GitHub never re-sends their install event). The first time
+// pr-minder sees any webhook from a repo, sweep its open PRs once; a KV flag makes it a one-time
+// pass, so every later event costs a single KV read. No cron, no polling. Going forward, new and
+// touched PRs are handled by the live opened/reopened/synchronize paths.
+async function maybeBackfillRepo(fullName: string, installationId: number, env: Env, log: Logger): Promise<void> {
+  if (!env.PR_STATE || (await wasBackfilled(env.PR_STATE, fullName))) return;
+  try {
+    const token = await installToken(installationId, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+    const [owner, name] = fullName.split('/');
+    const config = await loadConfig(owner, name, token, log);
+    await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
+    await markBackfilled(env.PR_STATE, fullName);
+  } catch (e) {
+    log.log(`maybeBackfill: ${fullName}: ${(e as Error).message}`);
   }
 }
 
@@ -247,8 +281,9 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(fullName, config, token, log);
-      await maybeRetriggerZombiesForRepo(fullName, config, token, log);
+      await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
       await maybeOpenPrsForRepo(fullName, config, token, log);
+      if (env.PR_STATE) await markBackfilled(env.PR_STATE, fullName);
       labelCheckedAt.set(fullName, Date.now());
     } catch (e) {
       log.log(`installation: ${fullName}: ${(e as Error).message}`);
@@ -265,8 +300,9 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(repo.full_name, config, token, log);
-      await maybeRetriggerZombiesForRepo(repo.full_name, config, token, log);
+      await maybeRetriggerZombiesForRepo(repo.full_name, config, token, env, log);
       await maybeOpenPrsForRepo(repo.full_name, config, token, log);
+      if (env.PR_STATE) await markBackfilled(env.PR_STATE, repo.full_name);
       labelCheckedAt.set(repo.full_name, Date.now());
     } catch (e) {
       log.log(`repos_added: ${repo.full_name}: ${(e as Error).message}`);
@@ -329,23 +365,6 @@ async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinde
 // that account's identity instead and trigger workflows normally.
 export function isActionsBotPr(pr: any): boolean {
   return pr?.user?.login === 'github-actions[bot]';
-}
-
-// Decide whether a just-opened or reopened PR needs its workflows kicked off.
-//
-// `opened`: the PR is brand new, so EVERY PR momentarily has zero runs — an empty run list
-// can't tell a zombie from a healthy PR whose runs haven't registered yet. The only race-free
-// signal is the author: github-actions[bot] means it was created with the default GITHUB_TOKEN,
-// whose events GitHub refuses to let trigger workflows.
-//
-// `reopened`: the PR isn't fresh, so an empty run list is trustworthy — trigger any PR that
-// still has no runs, whatever its author. Reopens performed by a bot (our own close+reopen, or
-// another GITHUB_TOKEN actor) are skipped via the sender, so our reopen can't loop.
-async function needsWorkflowTrigger(p: any, action: string, repo: string, pr: any, token: string, log: Logger): Promise<boolean> {
-  if (action === 'opened') return isActionsBotPr(pr);
-  if (p.sender?.type === 'Bot') return false;
-  if (!pr.head?.sha) return false;
-  return !(await hasWorkflowRuns(repo, pr.head.sha, token, log));
 }
 
 async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<boolean> {

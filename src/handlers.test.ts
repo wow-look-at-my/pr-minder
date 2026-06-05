@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch } from './handlers';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie } from './handlers';
+import { Logger } from './logger';
 
 const noApprovers = async () => new Set<string>();
 const approvers = (...names: string[]) => async () => new Set(names);
@@ -101,5 +102,90 @@ describe('shouldSkipBranch', () => {
 
   it('does not skip an ordinary feature branch', () => {
     expect(shouldSkipBranch('feature/x', 'main', ['staging'])).toBe(false);
+  });
+});
+
+describe('reviveIfZombie', () => {
+  // Map-backed stand-in for the KV binding (only get/put are used).
+  function fakeKV(initial: Record<string, string> = {}) {
+    const store = new Map<string, string>(Object.entries(initial));
+    const kv = {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => { store.set(k, v); },
+    };
+    return { env: { PR_STATE: kv } as any, store };
+  }
+
+  // Route fetch by URL substring (hasWorkflowRuns hits /actions/runs; retriggerWorkflows PATCHes /pulls/N).
+  function stubFetch(routes: Array<{ match: string; status: number; body?: unknown }>) {
+    const fn = vi.fn(async (url: string, _init?: any) => {
+      const route = routes.find((r) => url.includes(r.match));
+      if (!route) throw new Error(`unexpected fetch to ${url}`);
+      const text = JSON.stringify(route.body ?? {});
+      return { ok: route.status >= 200 && route.status < 300, status: route.status, text: async () => text, json: async () => JSON.parse(text) };
+    });
+    vi.stubGlobal('fetch', fn);
+    return fn;
+  }
+
+  const botPr = (overrides: Record<string, unknown> = {}) =>
+    ({ number: 174, draft: false, head: { sha: 'abc' }, user: { login: 'github-actions[bot]' }, ...overrides });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('reopens a bot PR with no runs and records its head SHA', async () => {
+    const { env, store } = fakeKV();
+    const fetchMock = stubFetch([
+      { match: '/actions/runs', status: 200, body: { total_count: 0 } },
+      { match: '/pulls/174', status: 200 },
+    ]);
+    const reopened = await reviveIfZombie(env, 'o/r', botPr(), 'tok', new Logger());
+
+    expect(reopened).toBe(true);
+    // close + reopen = two PATCHes to the PR
+    expect(fetchMock.mock.calls.filter(([u]) => u.includes('/pulls/174'))).toHaveLength(2);
+    expect(store.get('pr:o/r#174')).toBe('abc');
+  });
+
+  it('skips a PR already checked at the same SHA (no API calls)', async () => {
+    const { env } = fakeKV({ 'pr:o/r#174': 'abc' });
+    const fetchMock = stubFetch([]);
+    expect(await reviveIfZombie(env, 'o/r', botPr(), 'tok', new Logger())).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('re-checks when the head SHA changed (a touched PR)', async () => {
+    const { env, store } = fakeKV({ 'pr:o/r#174': 'oldsha' });
+    stubFetch([
+      { match: '/actions/runs', status: 200, body: { total_count: 0 } },
+      { match: '/pulls/174', status: 200 },
+    ]);
+    expect(await reviveIfZombie(env, 'o/r', botPr({ head: { sha: 'newsha' } }), 'tok', new Logger())).toBe(true);
+    expect(store.get('pr:o/r#174')).toBe('newsha');
+  });
+
+  it('ignores a non-bot PR without any API call or KV write', async () => {
+    const { env, store } = fakeKV();
+    const fetchMock = stubFetch([]);
+    expect(await reviveIfZombie(env, 'o/r', botPr({ user: { login: 'alice' } }), 'tok', new Logger())).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(store.size).toBe(0);
+  });
+
+  it('records but does not reopen a bot PR that already has runs', async () => {
+    const { env, store } = fakeKV();
+    const fetchMock = stubFetch([{ match: '/actions/runs', status: 200, body: { total_count: 3 } }]);
+    expect(await reviveIfZombie(env, 'o/r', botPr(), 'tok', new Logger())).toBe(false);
+    expect(fetchMock.mock.calls.filter(([u]) => u.includes('/pulls/174'))).toHaveLength(0);
+    expect(store.get('pr:o/r#174')).toBe('abc');
+  });
+
+  it('skips drafts and PRs with no head SHA', async () => {
+    const { env, store } = fakeKV();
+    const fetchMock = stubFetch([]);
+    expect(await reviveIfZombie(env, 'o/r', botPr({ draft: true }), 'tok', new Logger())).toBe(false);
+    expect(await reviveIfZombie(env, 'o/r', botPr({ head: {} }), 'tok', new Logger())).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(store.size).toBe(0);
   });
 });

@@ -1,6 +1,6 @@
 # pr-minder
 
-> pr-minder is a GitHub App (running as a Cloudflare Worker) that keeps pull requests healthy with zero per-repo workflow files. It keeps PR branches up to date with their base, syncs labels with GitHub's native auto-merge, revives "zombie" PRs whose CI never ran, and opens PRs for forgotten branches. It is opt-in and purely event-driven (no database, no cron).
+> pr-minder is a GitHub App (running as a Cloudflare Worker) that keeps pull requests healthy with zero per-repo workflow files. It keeps PR branches up to date with their base, syncs labels with GitHub's native auto-merge, revives "zombie" PRs whose CI never ran, and opens PRs for forgotten branches. It is opt-in and event-driven — no cron and no polling; it keeps only a little dedup state (which PRs it has already checked) in Workers KV.
 
 ## Install
 
@@ -82,11 +82,13 @@ With `mode: "auto_merge"`, adding the label arms GitHub's native auto-merge and 
 
 `auto_trigger_workflows` is a boolean (default `false`).
 
-A PR created with a workflow's default `GITHUB_TOKEN` (author `github-actions[bot]`) never triggers its own workflows — GitHub suppresses those runs to prevent recursion — so it sits open with no CI and can never go green. pr-minder revives these by closing and reopening the PR with its own App credentials, which fires a fresh `pull_request.reopened` event that runs the workflows for real.
+A PR created with a workflow's default `GITHUB_TOKEN` (author `github-actions[bot]`) never triggers its own workflows — GitHub suppresses those runs to prevent recursion — so it sits open with no CI and can never go green. pr-minder revives these by closing and reopening the PR with its own App credentials, which fires a fresh event that runs the workflows for real. It only ever acts on PRs authored by `github-actions[bot]` (the kind that can be a `GITHUB_TOKEN` zombie).
 
-- On the `opened` event it revives PRs authored by `github-actions[bot]` (a brand-new PR has no runs yet, so the author is the reliable signal).
-- On the `reopened` event it revives any open PR that still has zero workflow runs, whatever its author.
-- When the App is installed or repositories are added, it sweeps the open PRs in those repos and revives any zombies — catching ones that predate installation, without waiting for someone to reopen them by hand. To stay light on the API, the sweep only checks PRs authored by `github-actions[bot]` (the kind that can be a `GITHUB_TOKEN` zombie), so it costs about one extra request per bot-authored open PR rather than per open PR.
+It checks each PR **at most once per commit**, remembering what it has seen in Workers KV (keyed by the PR's head commit): a PR is only evaluated when its current commit hasn't been checked before, so an untouched PR is never re-checked, while new commits (a "touched" PR) are. When does it check?
+
+- **Live events** — a PR being opened, reopened, or pushed to (`synchronize`) is checked immediately.
+- **First time it sees a repo** — on the first webhook of any kind from a repo, it checks that repo's existing open PRs once. This is what revives zombies in repos that were *already* installed before the feature existed (GitHub never re-sends their install event), with no cron, no polling, and no reinstall — the repo's next bit of activity heals it.
+- **On install / adding repos** — it checks the open PRs in the repos being added.
 
 It will not loop: pr-minder's own reopen comes back as a `reopened` event sent by a bot, which is skipped.
 

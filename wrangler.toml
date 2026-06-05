@@ -19,5 +19,12 @@ enabled = true
 [observability.traces]
 enabled = true
 
+# State for the zombie check: per-PR "already checked at this commit" markers and a per-repo
+# backfill flag. Lets the check run at most once per PR per commit, and sweep an already-installed
+# repo's existing PRs exactly once (on its first webhook) — no polling, no cron.
+[[kv_namespaces]]
+binding = "PR_STATE"
+id = "ea2e44bf827043c68f96dfc098f0a744"
+
 [vars]
 GITHUB_APP_ID = "3433933"
