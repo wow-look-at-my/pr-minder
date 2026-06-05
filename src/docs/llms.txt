@@ -86,6 +86,7 @@ A PR created with a workflow's default `GITHUB_TOKEN` (author `github-actions[bo
 
 - On the `opened` event it revives PRs authored by `github-actions[bot]` (a brand-new PR has no runs yet, so the author is the reliable signal).
 - On the `reopened` event it revives any open PR that still has zero workflow runs, whatever its author.
+- When the App is installed or repositories are added, it sweeps the open PRs in those repos and revives any zombies — catching ones that predate installation, without waiting for someone to reopen them by hand. To stay light on the API, the sweep only checks PRs authored by `github-actions[bot]` (the kind that can be a `GITHUB_TOKEN` zombie), so it costs about one extra request per bot-authored open PR rather than per open PR.
 
 It will not loop: pr-minder's own reopen comes back as a `reopened` event sent by a bot, which is skipped.
 

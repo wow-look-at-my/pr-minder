@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, compareCommits, hasOpenPrForBranch, createPull, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -179,6 +179,29 @@ describe('hasWorkflowRuns', () => {
   it('fails safe to true on a non-2xx, so a transient error never forces a reopen', async () => {
     stubFetch(500, 'boom');
     expect(await hasWorkflowRuns('o/r', 'sha', 'tok', new Logger())).toBe(true);
+  });
+});
+
+describe('listOpenPulls', () => {
+  it('follows pagination until a short page and returns every PR', async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ number: i + 1 }));
+    const page2 = [{ number: 101 }, { number: 102 }];
+    const fetchMock = vi.fn(async (url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => (url.includes('page=2') ? page2 : page1),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pulls = await listOpenPulls('o/r', 'tok', new Logger());
+    expect(pulls).toHaveLength(102);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/pulls?state=open&per_page=100&page=1');
+  });
+
+  it('returns [] on a query error, so the sweep degrades to a no-op', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => [] })));
+    expect(await listOpenPulls('o/r', 'tok', new Logger())).toEqual([]);
   });
 });
 

@@ -123,6 +123,23 @@ export async function listBranches(repo: string, token: string, log: Logger): Pr
   return names;
 }
 
+// Every open PR in the repo, following pagination. Items are the raw GitHub PR objects
+// (callers read .number, .draft, .head.sha). Returns [] on a query error, so a transient
+// failure degrades to "nothing to sweep" instead of throwing.
+export async function listOpenPulls(repo: string, token: string, log: Logger): Promise<any[]> {
+  const pulls: any[] = [];
+  let page = 1;
+  for (;;) {
+    const r = await gh(`/repos/${repo}/pulls?state=open&per_page=100&page=${page}`, token, log);
+    if (!r.ok) break;
+    const data: any[] = await r.json();
+    for (const pr of data) pulls.push(pr);
+    if (data.length < 100) break;
+    page++;
+  }
+  return pulls;
+}
+
 export async function getDefaultBranch(repo: string, token: string, log: Logger): Promise<string | null> {
   const r = await gh(`/repos/${repo}`, token, log);
   if (!r.ok) return null;

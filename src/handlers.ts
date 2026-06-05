@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, compareCommits, hasOpenPrForBranch, listBranches, getDefaultBranch, createPull, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -207,6 +207,37 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
   }
 }
 
+// Catch-up sweep run when the App is installed or repos are added: revive any pre-existing
+// "zombie" PR — one a CI job opened with the default GITHUB_TOKEN (author github-actions[bot])
+// before pr-minder was watching, so its workflows never fired. Closing+reopening with our App
+// token fires a fresh `pull_request.reopened` event that runs them. Our own reopen returns
+// Bot-sent and is skipped on the live `reopened` path, so the sweep can't loop. Runs BEFORE the
+// auto_open_pr sweep so a PR we open this pass (App-authored, CI fires natively) is never mistaken
+// for a zombie by its momentary zero runs.
+//
+// Rate-limit shape: listOpenPulls already carries each PR's author, so we gate on
+// `isActionsBotPr` (free) and spend the one `hasWorkflowRuns` call ONLY on bot-authored PRs —
+// the sole kind that can be a GITHUB_TOKEN zombie. Cost is ~1 API call per *bot-authored* open
+// PR, not per open PR, which bounds the burst when a large installation is onboarded. (A human-
+// or PAT-authored PR with zero runs means the repo has no PR CI, which a reopen can't fix; the
+// live `reopened` path still handles any author when a human explicitly reopens a single PR.)
+async function maybeRetriggerZombiesForRepo(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  if (!config.autoTriggerWorkflows) return;
+  const prs = await listOpenPulls(repo, token, log);
+  const candidates = prs.filter((pr) => !pr.draft && isActionsBotPr(pr) && pr.head?.sha);
+  log.log(`${repo}: zombie sweep over ${prs.length} open PRs (${candidates.length} bot-authored)`);
+  for (const pr of candidates) {
+    const tag = `${repo}#${pr.number}`;
+    try {
+      if (await hasWorkflowRuns(repo, pr.head.sha, token, log)) continue;
+      log.log(`${tag}: zombie PR with no workflow runs; re-triggering (close+reopen)`);
+      await retriggerWorkflows(repo, pr.number, token, log);
+    } catch (e) {
+      log.log(`${tag}: zombie retrigger failed: ${(e as Error).message}`);
+    }
+  }
+}
+
 async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
   const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
   const repos = await listInstallationRepos(token, log);
@@ -216,6 +247,7 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(fullName, config, token, log);
+      await maybeRetriggerZombiesForRepo(fullName, config, token, log);
       await maybeOpenPrsForRepo(fullName, config, token, log);
       labelCheckedAt.set(fullName, Date.now());
     } catch (e) {
@@ -233,6 +265,7 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(repo.full_name, config, token, log);
+      await maybeRetriggerZombiesForRepo(repo.full_name, config, token, log);
       await maybeOpenPrsForRepo(repo.full_name, config, token, log);
       labelCheckedAt.set(repo.full_name, Date.now());
     } catch (e) {
