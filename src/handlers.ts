@@ -136,6 +136,14 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   const [owner, name] = repo.split('/');
   const config = await loadConfig(owner, name, token, log);
 
+  // A push to the default branch is our ambient trigger for already-installed repos: sweep for
+  // zombie PRs here too, not only at install/repos-added. GitHub never re-sends an install event
+  // for a repo that's already onboarded, so without this an existing zombie (one that predates the
+  // App) would sit dead until someone reopened it by hand. Gated on auto_trigger_workflows and
+  // bot-author, and self-limiting — once a revived PR's CI runs it has runs, so the next push skips
+  // it (no flapping in the normal case; a repo with no PR workflows at all is unfixable anyway).
+  await maybeRetriggerZombiesForRepo(repo, config, token, log);
+
   const r = await gh(`/repos/${owner}/${name}/pulls?state=open&per_page=100`, token, log);
   const prs: any[] = await r.json();
   log.log(`${repo} push: scanning ${prs.length} open PRs`);
