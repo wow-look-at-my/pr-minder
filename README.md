@@ -9,7 +9,7 @@ The deployed Worker also serves its own public docs: a human-readable page at `/
 ## How it works
 
 1. A GitHub App webhook fires on `pull_request`, `pull_request_review`, `push`, `installation`, or `installation_repositories` events
-2. The worker verifies the signature, mints an installation token, and calls GitHub's [update-branch API](https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request-branch)
+2. The worker verifies the signature, mints an installation token, and calls GitHub's [update-branch API](https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request-branch) — skipping the merge when the branch already contains the base's changes, so it avoids leaving empty "Merge branch ..." commits on PRs that are already up to date in content
 3. On `installation.created` or `installation.new_permissions_accepted`, sweeps all repos to create any configured labels
 4. No state, no DB, no cron -- purely event-driven
 

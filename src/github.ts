@@ -56,6 +56,46 @@ export async function updateBranch(repo: string, num: number, token: string, log
   throw new GhError(r.status, body);
 }
 
+// Would updating this PR's branch with its base introduce no changes — i.e. would GitHub's
+// update-branch leave an empty "Merge branch ..." commit on the PR? That happens when `head` is
+// "behind" base by commit *count* yet already contains base's *content* (a branch that tracks base
+// closely, e.g. an uprev/sync branch, or a head that already merged/superseded base's changes):
+// GitHub merges anyway and the 3-way result equals head's tree, so the merge commit has a zero diff.
+//
+// We answer it from GitHub's own test-merge of the PR (`merge_commit_sha`, kept at refs/pull/N/merge
+// = base merged with head). A clean 3-way merge's *tree* is independent of merge direction, so that
+// tree is exactly what update-branch (base into head) would produce; the merge is empty precisely
+// when it equals head's tree. We trust the test-merge only when it's provably current — its parents
+// must be the PR's *current* head and the *current* base tip (`baseTipSha`). GitHub recomputes the
+// test-merge asynchronously, so a just-moved base can briefly leave it stale; a stale (or absent)
+// one fails the parent check and we return false, so update-branch still runs. Because we verify the
+// parents, a "true" means the tree we compared really is the merge of these exact commits — a wrong
+// skip (dropping a genuine update) is impossible; the worst case is a missed skip (a harmless extra
+// merge), never a missed update.
+export async function mergeWouldBeEmpty(repo: string, pr: any, baseTipSha: string | null, token: string, log: Logger): Promise<boolean> {
+  const headSha: string | undefined = pr?.head?.sha;
+  const mergeSha: string | undefined = pr?.merge_commit_sha;
+  if (!headSha || !mergeSha || !baseTipSha) return false;
+  const merge = await commitMeta(repo, mergeSha, token, log);
+  if (!merge) return false;
+  // Only trust a test-merge of the current head and base; otherwise it predates a move and is stale.
+  if (!merge.parents.includes(headSha) || !merge.parents.includes(baseTipSha)) return false;
+  const head = await commitMeta(repo, headSha, token, log);
+  if (!head) return false;
+  return merge.tree === head.tree;
+}
+
+// Tree SHA and parent SHAs of a commit, via the lightweight Git Data API (no file list, unlike
+// /repos/.../commits/{sha}). Null on any error so callers fail safe.
+async function commitMeta(repo: string, sha: string, token: string, log: Logger): Promise<{ tree: string; parents: string[] } | null> {
+  const r = await gh(`/repos/${repo}/git/commits/${sha}`, token, log);
+  if (!r.ok) return null;
+  const data: any = await r.json();
+  const tree = data?.tree?.sha;
+  if (typeof tree !== 'string') return null;
+  return { tree, parents: (data.parents ?? []).map((p: any) => p.sha) };
+}
+
 // A PR opened with the default GITHUB_TOKEN (author github-actions[bot]) never triggers
 // its own workflows: GitHub suppresses runs from that token to prevent recursion. Closing
 // and reopening the PR with a *different* credential — our App's installation token — fires
