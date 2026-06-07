@@ -26,5 +26,10 @@ enabled = true
 binding = "PR_STATE"
 id = "ea2e44bf827043c68f96dfc098f0a744"
 
+# Deploy version id ({ id, tag, timestamp }); keys the once-per-deploy gate on the startup
+# auto-merge reconcile so a redeploy triggers the sweep exactly once across all edge isolates.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
 [vars]
 GITHUB_APP_ID = "3433933"

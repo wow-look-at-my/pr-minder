@@ -72,6 +72,23 @@ async function maybeEnsureLabelsForRepo(
 // The startup pass exists only to catch what happened while pr-minder was a previous version (or
 // down) — e.g. a PR that was labeled but never got auto-merge armed because of a bug now fixed.
 export async function startupReconcile(env: Env, log: Logger): Promise<void> {
+  // Gate on the deploy version so the cross-repo sweep runs once per *deploy*, not once per isolate.
+  // After a deploy many isolates cold-start across the edge and each would otherwise sweep; keying a
+  // KV flag on the Worker version id collapses those to a single trigger. (The module-level guard in
+  // worker.ts already keeps it to once per isolate; this makes it once per version.) Set the flag
+  // before sweeping so a concurrent isolate that loses the race skips instead of duplicating. If
+  // there's no version binding we can't dedup safely (a constant key would block all future
+  // deploys), so we fall back to the per-isolate guard alone.
+  const version = env.CF_VERSION_METADATA?.id;
+  if (env.PR_STATE && version) {
+    const key = `startup:${version}`;
+    if (await env.PR_STATE.get(key)) {
+      log.log(`startupReconcile: already swept for version ${version}`);
+      return;
+    }
+    await env.PR_STATE.put(key, new Date().toISOString());
+  }
+
   let installs: number[];
   try {
     installs = await listInstallations(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);

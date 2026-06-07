@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie, reconcileAutoMerge } from './handlers';
+import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie, reconcileAutoMerge, startupReconcile } from './handlers';
 import { Logger } from './logger';
 import type { PrMinderConfig } from './config';
 
@@ -247,5 +247,37 @@ describe('reconcileAutoMerge', () => {
     ]);
     await expect(reconcileAutoMerge('o/r', cfg({ ship: autoMergeLabel }), 'tok', new Logger())).resolves.toBeUndefined();
     expect(fetchMock.mock.calls.filter(([u]) => u.includes('/graphql'))).toHaveLength(2);
+  });
+});
+
+describe('startupReconcile', () => {
+  function fakeKV(initial: Record<string, string> = {}) {
+    const store = new Map<string, string>(Object.entries(initial));
+    const env = {
+      PR_STATE: { get: async (k: string) => store.get(k) ?? null, put: async (k: string, v: string) => { store.set(k, v); } },
+      CF_VERSION_METADATA: { id: 'v1', tag: '', timestamp: '' },
+      GITHUB_APP_ID: 'app',
+      GITHUB_APP_PRIVATE_KEY: 'not-a-real-key',
+    } as any;
+    return { env, store };
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('skips the whole sweep when this deploy version was already swept (no API calls)', async () => {
+    const { env } = fakeKV({ 'startup:v1': '2026-01-01T00:00:00Z' });
+    const fetchMock = vi.fn(async () => { throw new Error('should not fetch'); });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(startupReconcile(env, new Logger())).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('claims the per-version flag before sweeping, so a concurrent isolate skips', async () => {
+    const { env, store } = fakeKV();
+    // The credential-less sweep no-ops (listInstallations fails on the fake key and is swallowed),
+    // but the version flag must already be set so a second isolate sees it and bails.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => [], text: async () => '[]' })));
+    await startupReconcile(env, new Logger());
+    expect(store.get('startup:v1')).toBeTruthy();
   });
 });

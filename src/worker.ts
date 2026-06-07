@@ -13,7 +13,11 @@ export interface Env {
   GITHUB_APP_ID: string;
   GITHUB_APP_PRIVATE_KEY: string; // PEM, PKCS8
   WEBHOOK_SECRET: string;
-  PR_STATE: KVNamespace; // zombie-check state: per-PR "checked at SHA" + per-repo backfill flag
+  PR_STATE: KVNamespace; // zombie-check state: per-PR "checked at SHA" + per-repo backfill flag + per-version startup flag
+  // Cloudflare Version Metadata binding: { id, tag, timestamp }. `id` changes per deploy, so it
+  // keys the once-per-deploy gate on the startup auto-merge reconcile. Optional so dev/tests without
+  // the binding still typecheck (the gate then degrades to the per-isolate guard).
+  CF_VERSION_METADATA?: { id: string; tag: string; timestamp: string };
 }
 
 // Reconcile-on-startup, not poll. Each fresh isolate (e.g. after a deploy) runs the cross-repo
