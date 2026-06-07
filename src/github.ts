@@ -91,6 +91,20 @@ export async function hasWorkflowRuns(repo: string, headSha: string, token: stri
   return (data.total_count ?? 0) > 0;
 }
 
+// Age of a commit in seconds (now - committer date), or null if it can't be determined. Used to
+// tell a genuinely CI-less "zombie" commit (old enough that its workflows would have registered by
+// now) from one that's merely too fresh to judge — e.g. a commit pr-minder just created via
+// update-branch, whose runs haven't appeared yet. Null on any error so the caller can fail safe.
+export async function commitAgeSeconds(repo: string, sha: string, token: string, log: Logger): Promise<number | null> {
+  const r = await gh(`/repos/${repo}/commits/${sha}`, token, log);
+  if (!r.ok) return null;
+  const data: any = await r.json();
+  const dateStr: string | undefined = data?.commit?.committer?.date ?? data?.commit?.author?.date;
+  const ms = dateStr ? Date.parse(dateStr) : NaN;
+  if (Number.isNaN(ms)) return null;
+  return Math.max(0, Math.floor((Date.now() - ms) / 1000));
+}
+
 // `${base}...${head}` commit comparison. Returns null on error (caller skips). Branch names
 // keep their slashes in the path; git ref rules forbid the characters that would need encoding.
 export async function compareCommits(repo: string, base: string, head: string, token: string, log: Logger): Promise<{ ahead_by: number; behind_by: number } | null> {
