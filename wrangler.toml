@@ -13,6 +13,13 @@ type = "Data"
 globs = ["**/*.gz"]
 fallthrough = true
 
+# Re-check sweep. Not a poll over all PRs: the handler reads only the `recheck:` reminders that
+# reviveIfZombie leaves for a follow-up commit too fresh to judge when its webhook arrived, so an
+# empty run is one KV list and zero GitHub calls. It exists because webhooks don't re-fire on their
+# own once a commit has aged past the "is its CI here yet?" window.
+[triggers]
+crons = ["*/5 * * * *"]
+
 [observability]
 enabled = true
 

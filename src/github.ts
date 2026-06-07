@@ -248,6 +248,27 @@ export async function listInstallations(appId: string, privateKey: string, log: 
   return ids;
 }
 
+// The installation id covering a single repo, via GET /repos/{repo}/installation (an App-level
+// endpoint, so JWT auth). Lets a context that only knows the repo — e.g. the scheduled re-check
+// sweep reading reminders out of KV — mint an installation token for it. Null on error.
+export async function repoInstallationId(repo: string, appId: string, privateKey: string, log: Logger): Promise<number | null> {
+  const jwt = await appJWT(appId, privateKey);
+  const r = await fetch(`https://api.github.com/repos/${repo}/installation`, {
+    headers: { authorization: `Bearer ${jwt}`, accept: 'application/vnd.github+json', 'user-agent': 'pr-minder' },
+  });
+  if (!r.ok) { log.log(`repoInstallationId ${repo}: ${r.status}`); return null; }
+  const data: any = await r.json();
+  return data.id ?? null;
+}
+
+// A single PR object (callers read .state, .draft, .head.sha, .user). Null on error or 404, so a
+// caller can treat "gone" and "transient failure" alike (skip).
+export async function getPull(repo: string, num: number, token: string, log: Logger): Promise<any | null> {
+  const r = await gh(`/repos/${repo}/pulls/${num}`, token, log);
+  if (!r.ok) return null;
+  return r.json();
+}
+
 export async function listInstallationRepos(token: string, log: Logger): Promise<string[]> {
   const repos: string[] = [];
   let page = 1;

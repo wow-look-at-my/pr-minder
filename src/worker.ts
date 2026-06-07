@@ -1,7 +1,7 @@
 // MIT
 // GitHub App must subscribe to: pull_request, pull_request_review, push
 // Also handles: installation, installation_repositories (auto-delivered to all apps)
-import { handle, startupReconcile } from './handlers';
+import { handle, startupReconcile, runRechecks } from './handlers';
 import { GhError } from './github';
 import { Logger } from './logger';
 import { verifyWebhook } from './webhook';
@@ -55,6 +55,15 @@ export default {
       status = e instanceof GhError ? e.status : 500;
     }
     return new Response(log.toString() || 'ok', { status, headers: { 'content-type': 'text/plain' } });
+  },
+
+  // Cron entry point. Drains the `recheck:` reminders reviveIfZombie leaves for follow-up commits
+  // that were too fresh to judge when their webhook arrived (e.g. a zombie commit pushed to an
+  // already-handled PR). This is NOT a poll over all PRs: with no reminders it's a single KV list
+  // and no GitHub calls. Schedule in wrangler.toml ([triggers] crons).
+  async scheduled(_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    const log = new Logger();
+    await runRechecks(env, log);
   },
 };
 

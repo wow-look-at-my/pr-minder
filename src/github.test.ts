@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -222,6 +222,20 @@ describe('commitAgeSeconds', () => {
   it('returns null when the payload carries no usable date', async () => {
     stubFetch(200, { commit: {} });
     expect(await commitAgeSeconds('o/r', 'sha', 'tok', new Logger())).toBeNull();
+  });
+});
+
+describe('getPull', () => {
+  it('fetches the PR and returns the parsed object', async () => {
+    const fetchMock = stubFetch(200, { number: 174, state: 'open', head: { sha: 'abc' } });
+    const pr = await getPull('o/r', 174, 'tok', new Logger());
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/pulls/174');
+    expect(pr).toMatchObject({ number: 174, state: 'open' });
+  });
+
+  it('returns null on a non-2xx (gone or transient)', async () => {
+    stubFetch(404, { message: 'Not Found' });
+    expect(await getPull('o/r', 999, 'tok', new Logger())).toBeNull();
   });
 });
 

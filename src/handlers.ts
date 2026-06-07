@@ -1,7 +1,7 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
-import { checkedSha, markChecked, wasBackfilled, markBackfilled } from './state';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
+import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks } from './state';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -323,14 +323,55 @@ export async function reviveIfZombie(env: Env, repo: string, pr: any, token: str
     }
     if (!act) {
       log.log(`${repo}#${pr.number}: no runs but follow-up commit too fresh; deferring revive`);
-      return false; // don't record this SHA — a later event re-evaluates it once it has aged
+      // Don't record this SHA. Drop a reminder so the scheduled sweep re-evaluates it once it has
+      // aged — webhooks won't re-fire on their own, and by then its runs have either registered
+      // (so it won't be revived) or it's a genuine zombie (so it will).
+      if (env.PR_STATE) await setRecheck(env.PR_STATE, repo, pr.number);
+      return false;
     }
     log.log(`${repo}#${pr.number}: zombie PR with no workflow runs; re-triggering (close+reopen)`);
     await retriggerWorkflows(repo, pr.number, token, log);
     reopened = true;
   }
-  if (env.PR_STATE) await markChecked(env.PR_STATE, repo, pr.number, sha);
+  // Recorded a verdict for this commit, so any pending reminder is now resolved.
+  if (env.PR_STATE) {
+    await markChecked(env.PR_STATE, repo, pr.number, sha);
+    await clearRecheck(env.PR_STATE, repo, pr.number);
+  }
   return reopened;
+}
+
+// Scheduled re-check sweep (the Worker's cron entry point). reviveIfZombie defers a follow-up commit
+// that's too fresh to judge by leaving a `recheck:` reminder in KV; this drains those once they've
+// aged. It reads only the reminders — when there are none it makes a single KV list and zero GitHub
+// API calls, so the cron is nearly free at rest (not a poll over all PRs). For each pending PR it
+// mints a token for that repo (cached per run), refetches the PR, and re-runs reviveIfZombie, which
+// now either revives a still-CI-less commit or records it. Reminders for closed/missing PRs are
+// cleared. No-ops without a KV binding.
+export async function runRechecks(env: Env, log: Logger): Promise<void> {
+  if (!env.PR_STATE) return;
+  const pending = await listRechecks(env.PR_STATE);
+  if (pending.length === 0) return;
+  log.log(`recheck sweep: ${pending.length} pending PR(s)`);
+  const tokenByRepo = new Map<string, string | null>();
+  for (const { repo, num } of pending) {
+    try {
+      if (!tokenByRepo.has(repo)) {
+        const instId = await repoInstallationId(repo, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+        tokenByRepo.set(repo, instId === null ? null : await installToken(instId, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log));
+      }
+      const token = tokenByRepo.get(repo) ?? null;
+      if (!token) continue; // no token (repo uninstalled, or a transient error) — leave it; the TTL bounds it
+      const pr = await getPull(repo, num, token, log);
+      if (!pr) continue; // transient fetch failure — leave the reminder for the next sweep
+      if (pr.state !== 'open') { await clearRecheck(env.PR_STATE, repo, num); continue; } // closed/merged — done
+      // reviveIfZombie self-manages the reminder: it clears it on a verdict, or (if still somehow
+      // too fresh) leaves a fresh one for the next sweep.
+      await reviveIfZombie(env, repo, pr, token, log);
+    } catch (e) {
+      log.log(`recheck ${repo}#${num}: ${(e as Error).message}`);
+    }
+  }
 }
 
 // Sweep a repo's open PRs through reviveIfZombie. Used by the install/repos-added handlers and the

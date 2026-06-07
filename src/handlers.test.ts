@@ -138,6 +138,7 @@ describe('reviveIfZombie', () => {
     const kv = {
       get: async (k: string) => store.get(k) ?? null,
       put: async (k: string, v: string) => { store.set(k, v); },
+      delete: async (k: string) => { store.delete(k); },
     };
     return { env: { PR_STATE: kv } as any, store };
   }
@@ -197,8 +198,8 @@ describe('reviveIfZombie', () => {
     expect(fetchMock.mock.calls.some(([u]) => u.includes('/commits/'))).toBe(false);
   });
 
-  it('re-revives a touched PR whose new commit has aged without gaining runs', async () => {
-    const { env, store } = fakeKV({ 'pr:o/r#174': 'oldsha' });
+  it('re-revives a touched PR whose new commit has aged without gaining runs, clearing the reminder', async () => {
+    const { env, store } = fakeKV({ 'pr:o/r#174': 'oldsha', 'recheck:o/r#174': 'ts' });
     stubFetch([
       { match: '/actions/runs', status: 200, body: { total_count: 0 } },
       { match: '/commits/', status: 200, body: { commit: { committer: { date: OLD_DATE } } } },
@@ -206,9 +207,10 @@ describe('reviveIfZombie', () => {
     ]);
     expect(await reviveIfZombie(env, 'o/r', botPr({ head: { sha: 'newsha' } }), 'tok', new Logger())).toBe(true);
     expect(store.get('pr:o/r#174')).toBe('newsha');
+    expect(store.has('recheck:o/r#174')).toBe(false); // verdict recorded -> reminder cleared
   });
 
-  it('defers a too-fresh follow-up commit — no second close+reopen (the bug fix)', async () => {
+  it('defers a too-fresh follow-up commit and leaves a recheck reminder (the bug fix)', async () => {
     const { env, store } = fakeKV({ 'pr:o/r#174': 'oldsha' });
     const fetchMock = stubFetch([
       { match: '/actions/runs', status: 200, body: { total_count: 0 } },
@@ -217,8 +219,9 @@ describe('reviveIfZombie', () => {
     // Simulates pr-minder's own update-branch merge: a brand-new head SHA with no runs yet.
     expect(await reviveIfZombie(env, 'o/r', botPr({ head: { sha: 'mergesha' } }), 'tok', new Logger())).toBe(false);
     expect(fetchMock.mock.calls.filter(([u]) => u.includes('/pulls/174'))).toHaveLength(0);
-    // Not recorded, so a later event re-evaluates it once it has aged (by then it has CI -> no revive).
+    // Not recorded (so a later sweep re-evaluates), and a reminder is dropped for that sweep.
     expect(store.get('pr:o/r#174')).toBe('oldsha');
+    expect(store.has('recheck:o/r#174')).toBe(true);
   });
 
   it('ignores a non-bot PR without any API call or KV write', async () => {
