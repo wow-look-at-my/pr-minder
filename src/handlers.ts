@@ -88,12 +88,12 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
 
   // Revive a "zombie" PR — author github-actions[bot] with no workflow runs of its own (created
   // with the default GITHUB_TOKEN, whose events GitHub won't let trigger workflows). Closing+
-  // reopening with our App token fires a fresh event that DOES run them. The KV seen-set keeps this
-  // to once per commit; `synchronize` is included so new commits (a "touch") get re-checked. Skip
-  // reopens we triggered ourselves (Bot sender) so the close+reopen can't loop. If we did reopen,
-  // return — the PR was just closed+reopened, and the fresh event will drive the rest.
-  if (config.autoTriggerWorkflows && ['opened', 'reopened', 'synchronize'].includes(action)
-      && !(action === 'reopened' && p.sender?.type === 'Bot')) {
+  // reopening with our App token fires a fresh event that DOES run them. shouldConsiderRevive gates
+  // which events qualify (see its comment) — in particular it ignores a `synchronize` that anyone
+  // other than github-actions[bot] pushed, so pr-minder's own update-branch merge doesn't re-trigger
+  // a revive. If we did reopen, return — the PR was just closed+reopened, and the fresh event drives
+  // the rest.
+  if (config.autoTriggerWorkflows && shouldConsiderRevive(action, p.sender)) {
     if (await reviveIfZombie(env, repo, pr, token, log)) return;
   }
 
@@ -359,12 +359,35 @@ async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinde
   }
 }
 
+// The actor behind the default GITHUB_TOKEN. Commits and PRs it creates never trigger their own
+// workflows (GitHub's recursion guard), so it's the precise signal that a commit is a CI-less
+// "zombie". Every other actor — a human, a third-party app, or pr-minder's own App installation
+// token — triggers workflows normally.
+const ACTIONS_BOT = 'github-actions[bot]';
+
 // A PR authored by github-actions[bot] was created with the default GITHUB_TOKEN, whose
 // events never trigger workflow runs (GitHub's recursion guard). That author is the precise
 // signal that the PR's own CI never ran: PRs created via a PAT or another App token carry
 // that account's identity instead and trigger workflows normally.
 export function isActionsBotPr(pr: any): boolean {
-  return pr?.user?.login === 'github-actions[bot]';
+  return pr?.user?.login === ACTIONS_BOT;
+}
+
+// Which pull_request actions may trigger a zombie revive, given the event's sender. Only
+// github-actions[bot] produces CI-less commits, so it's the only actor a revive should react to:
+//   opened     — a freshly created PR; reviveIfZombie's own isActionsBotPr gate then confirms author.
+//   reopened   — eligible, UNLESS a Bot sent it: that's our own close+reopen coming back (loop guard).
+//   synchronize— eligible ONLY when github-actions[bot] pushed the new commit. A synchronize from
+//                anyone else — a human, a third-party app, or pr-minder's own update-branch merge —
+//                is a commit that triggers CI natively, so re-reviving it is both pointless and the
+//                cause of a spurious *second* close+reopen on an auto-updated bot PR: the update-branch
+//                merge changes the head SHA (so KV hasn't deduped it) and its runs haven't registered
+//                yet (so hasWorkflowRuns momentarily reads 0), which used to trip a needless revive.
+export function shouldConsiderRevive(action: string, sender: any): boolean {
+  if (!['opened', 'reopened', 'synchronize'].includes(action)) return false;
+  if (action === 'reopened' && sender?.type === 'Bot') return false;
+  if (action === 'synchronize' && sender?.login !== ACTIONS_BOT) return false;
+  return true;
 }
 
 async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<boolean> {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie } from './handlers';
+import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie, shouldConsiderRevive } from './handlers';
 import { Logger } from './logger';
 
 const noApprovers = async () => new Set<string>();
@@ -86,6 +86,43 @@ describe('isActionsBotPr', () => {
   it('is false when the author is missing', () => {
     expect(isActionsBotPr({})).toBe(false);
     expect(isActionsBotPr(undefined)).toBe(false);
+  });
+});
+
+describe('shouldConsiderRevive', () => {
+  const gha = { login: 'github-actions[bot]', type: 'Bot' };
+  const prMinder = { login: 'pr-minder[bot]', type: 'Bot' };
+  const human = { login: 'alice', type: 'User' };
+
+  it('considers opened regardless of sender (isActionsBotPr is the backstop)', () => {
+    expect(shouldConsiderRevive('opened', gha)).toBe(true);
+    expect(shouldConsiderRevive('opened', human)).toBe(true);
+    expect(shouldConsiderRevive('opened', prMinder)).toBe(true);
+  });
+
+  it('considers reopened unless a Bot sent it (our own close+reopen loop guard)', () => {
+    expect(shouldConsiderRevive('reopened', human)).toBe(true);
+    expect(shouldConsiderRevive('reopened', gha)).toBe(false);
+    expect(shouldConsiderRevive('reopened', prMinder)).toBe(false);
+  });
+
+  it('considers synchronize only when github-actions[bot] pushed it', () => {
+    expect(shouldConsiderRevive('synchronize', gha)).toBe(true);
+  });
+
+  it('ignores a synchronize from pr-minder\'s own update-branch merge (the double close+reopen bug)', () => {
+    expect(shouldConsiderRevive('synchronize', prMinder)).toBe(false);
+  });
+
+  it('ignores a synchronize from a human or third-party app (those commits trigger CI natively)', () => {
+    expect(shouldConsiderRevive('synchronize', human)).toBe(false);
+    expect(shouldConsiderRevive('synchronize', { login: 'dependabot[bot]', type: 'Bot' })).toBe(false);
+  });
+
+  it('ignores unrelated actions and a missing sender on synchronize', () => {
+    expect(shouldConsiderRevive('labeled', gha)).toBe(false);
+    expect(shouldConsiderRevive('closed', gha)).toBe(false);
+    expect(shouldConsiderRevive('synchronize', undefined)).toBe(false);
   });
 });
 
