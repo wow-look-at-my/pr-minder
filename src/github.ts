@@ -273,17 +273,20 @@ export async function enableAutoMerge(repo: string, num: number, nodeId: string,
   log.log(`enableAutoMerge ${repo}#${num}: ${status} ${body}`);
   // A non-2xx is a transport failure — throw so GitHub retries.
   if (!ok) throw new GhError(status, body);
-  // HTTP 200 + errors[] = logical failure. The common one for an already-green PR is
-  // "Pull request is in clean status": GitHub refuses native auto-merge when nothing is pending
-  // (no required checks/reviews left to wait on). The label means "merge this", so the right
-  // move is to merge it directly with the configured method.
-  if (graphqlErrorsMatch(errors, /clean status/i)) {
-    log.log(`enableAutoMerge ${repo}#${num}: PR already mergeable, merging directly`);
-    await mergePullRequest(repo, num, method, token, log);
-    return;
-  }
-  // Other logical errors (auto-merge not allowed in the repo, already enabled, etc.) are
-  // non-retryable and need no action — swallow them.
+  // HTTP 200 + errors[] means GitHub refused to *arm* native auto-merge. The label still means
+  // "merge this PR", so fall back to a direct merge. The two reasons this happens are both ones
+  // where merging directly is exactly right:
+  //   - "Pull request is in clean status": nothing is pending, so there's nothing for native
+  //     auto-merge to wait on — the PR is ready to merge now.
+  //   - "...Auto merge is not allowed for this repository": the repo hasn't turned on
+  //     Settings > Pull Requests > Allow auto-merge (which pr-minder can't toggle — it has no
+  //     administration permission), so native auto-merge is simply unavailable there.
+  // mergePullRequest is the final authority: branch protection still gates the merge and a PR that
+  // isn't actually mergeable comes back as a swallowed 4xx, so this never merges something GitHub
+  // wouldn't. (When native auto-merge *can* be armed, the success path above returns first, so we
+  // never pre-empt GitHub's wait-for-checks behavior.)
+  log.log(`enableAutoMerge ${repo}#${num}: native auto-merge unavailable, merging directly`);
+  await mergePullRequest(repo, num, method, token, log);
 }
 
 // Direct merge via the REST endpoint (this one DOES exist, unlike per-PR auto-merge). Used as
@@ -301,13 +304,6 @@ export async function mergePullRequest(repo: string, num: number, method: string
   // branch protection still gates the merge, and none are retryable, so log and move on. 5xx is
   // transient — throw so GitHub redelivers the webhook.
   if (r.status >= 500) throw new GhError(r.status, body);
-}
-
-// GraphQL logical errors arrive as a top-level `errors` array; test their messages.
-function graphqlErrorsMatch(errors: unknown, re: RegExp): boolean {
-  return Array.isArray(errors) && errors.some(
-    (e) => e && typeof (e as { message?: unknown }).message === 'string' && re.test((e as { message: string }).message),
-  );
 }
 
 export async function disableAutoMerge(repo: string, num: number, nodeId: string, token: string, log: Logger): Promise<void> {
