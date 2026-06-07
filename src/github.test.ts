@@ -57,12 +57,29 @@ describe('enableAutoMerge', () => {
     }
   });
 
-  it('swallows other GraphQL logical errors without merging (e.g. auto-merge not allowed)', async () => {
+  it('falls back to a direct merge when the repo has not enabled "Allow auto-merge"', async () => {
+    // GitHub refuses to arm native auto-merge with this error when the repo setting is off.
+    // pr-minder can't toggle that setting, so the label still has to mean "merge this PR".
     const fetchMock = stubFetchRoutes([
+      { match: '/graphql', status: 200, body: { data: { enablePullRequestAutoMerge: null }, errors: [{ message: 'Pull request Auto merge is not allowed for this repository' }] } },
+      { match: '/pulls/5/merge', status: 200, body: { merged: true } },
+    ]);
+    await enableAutoMerge('o/r', 5, 'PR_x', 'squash', 'tok', new Logger());
+
+    const mergeCall = fetchMock.mock.calls.find(([url]) => url.includes('/pulls/5/merge'));
+    expect(mergeCall).toBeDefined();
+    expect(mergeCall![1].method).toBe('PUT');
+    expect(JSON.parse(mergeCall![1].body).merge_method).toBe('squash');
+  });
+
+  it('does not throw when the direct-merge fallback is itself declined (e.g. PR not mergeable yet)', async () => {
+    // In a repo without native auto-merge, a PR with pending required checks can't be merged now;
+    // the swallowed 4xx means we never merge something branch protection would block.
+    stubFetchRoutes([
       { match: '/graphql', status: 200, body: { errors: [{ message: 'Pull request Auto merge is not allowed for this repository' }] } },
+      { match: '/pulls/5/merge', status: 405, body: { message: 'Required status checks must pass' } },
     ]);
     await expect(enableAutoMerge('o/r', 5, 'PR_x', 'squash', 'tok', new Logger())).resolves.toBeUndefined();
-    expect(fetchMock.mock.calls.every(([url]) => !url.includes('/merge'))).toBe(true);
   });
 
   it('falls back to a direct merge when the PR is already in "clean status"', async () => {
