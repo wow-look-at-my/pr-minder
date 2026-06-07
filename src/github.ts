@@ -91,6 +91,20 @@ export async function hasWorkflowRuns(repo: string, headSha: string, token: stri
   return (data.total_count ?? 0) > 0;
 }
 
+// Age of a commit in seconds (now - committer date), or null if it can't be determined. Used to
+// tell a genuinely CI-less "zombie" commit (old enough that its workflows would have registered by
+// now) from one that's merely too fresh to judge — e.g. a commit pr-minder just created via
+// update-branch, whose runs haven't appeared yet. Null on any error so the caller can fail safe.
+export async function commitAgeSeconds(repo: string, sha: string, token: string, log: Logger): Promise<number | null> {
+  const r = await gh(`/repos/${repo}/commits/${sha}`, token, log);
+  if (!r.ok) return null;
+  const data: any = await r.json();
+  const dateStr: string | undefined = data?.commit?.committer?.date ?? data?.commit?.author?.date;
+  const ms = dateStr ? Date.parse(dateStr) : NaN;
+  if (Number.isNaN(ms)) return null;
+  return Math.max(0, Math.floor((Date.now() - ms) / 1000));
+}
+
 // `${base}...${head}` commit comparison. Returns null on error (caller skips). Branch names
 // keep their slashes in the path; git ref rules forbid the characters that would need encoding.
 export async function compareCommits(repo: string, base: string, head: string, token: string, log: Logger): Promise<{ ahead_by: number; behind_by: number } | null> {
@@ -232,6 +246,27 @@ export async function listInstallations(appId: string, privateKey: string, log: 
     page++;
   }
   return ids;
+}
+
+// The installation id covering a single repo, via GET /repos/{repo}/installation (an App-level
+// endpoint, so JWT auth). Lets a context that only knows the repo — e.g. the scheduled re-check
+// sweep reading reminders out of KV — mint an installation token for it. Null on error.
+export async function repoInstallationId(repo: string, appId: string, privateKey: string, log: Logger): Promise<number | null> {
+  const jwt = await appJWT(appId, privateKey);
+  const r = await fetch(`https://api.github.com/repos/${repo}/installation`, {
+    headers: { authorization: `Bearer ${jwt}`, accept: 'application/vnd.github+json', 'user-agent': 'pr-minder' },
+  });
+  if (!r.ok) { log.log(`repoInstallationId ${repo}: ${r.status}`); return null; }
+  const data: any = await r.json();
+  return data.id ?? null;
+}
+
+// A single PR object (callers read .state, .draft, .head.sha, .user). Null on error or 404, so a
+// caller can treat "gone" and "transient failure" alike (skip).
+export async function getPull(repo: string, num: number, token: string, log: Logger): Promise<any | null> {
+  const r = await gh(`/repos/${repo}/pulls/${num}`, token, log);
+  if (!r.ok) return null;
+  return r.json();
 }
 
 export async function listInstallationRepos(token: string, log: Logger): Promise<string[]> {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -196,6 +196,46 @@ describe('hasWorkflowRuns', () => {
   it('fails safe to true on a non-2xx, so a transient error never forces a reopen', async () => {
     stubFetch(500, 'boom');
     expect(await hasWorkflowRuns('o/r', 'sha', 'tok', new Logger())).toBe(true);
+  });
+});
+
+describe('commitAgeSeconds', () => {
+  it('queries the commit endpoint and returns seconds since the committer date', async () => {
+    const tenMinAgo = new Date(Date.now() - 600_000).toISOString();
+    const fetchMock = stubFetch(200, { commit: { committer: { date: tenMinAgo } } });
+    const age = await commitAgeSeconds('o/r', 'deadbeef', 'tok', new Logger());
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/commits/deadbeef');
+    expect(age).toBeGreaterThanOrEqual(590);
+    expect(age).toBeLessThanOrEqual(610);
+  });
+
+  it('falls back to the author date when the committer date is absent', async () => {
+    stubFetch(200, { commit: { author: { date: new Date(Date.now() - 120_000).toISOString() } } });
+    expect(await commitAgeSeconds('o/r', 'sha', 'tok', new Logger())).toBeGreaterThanOrEqual(110);
+  });
+
+  it('returns null on a non-2xx so the caller fails safe (defers rather than re-closes)', async () => {
+    stubFetch(404, 'nope');
+    expect(await commitAgeSeconds('o/r', 'sha', 'tok', new Logger())).toBeNull();
+  });
+
+  it('returns null when the payload carries no usable date', async () => {
+    stubFetch(200, { commit: {} });
+    expect(await commitAgeSeconds('o/r', 'sha', 'tok', new Logger())).toBeNull();
+  });
+});
+
+describe('getPull', () => {
+  it('fetches the PR and returns the parsed object', async () => {
+    const fetchMock = stubFetch(200, { number: 174, state: 'open', head: { sha: 'abc' } });
+    const pr = await getPull('o/r', 174, 'tok', new Logger());
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/pulls/174');
+    expect(pr).toMatchObject({ number: 174, state: 'open' });
+  });
+
+  it('returns null on a non-2xx (gone or transient)', async () => {
+    stubFetch(404, { message: 'Not Found' });
+    expect(await getPull('o/r', 999, 'tok', new Logger())).toBeNull();
   });
 });
 

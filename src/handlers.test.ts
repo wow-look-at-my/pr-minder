@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie, reconcileAutoMerge, startupReconcile } from './handlers';
+import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, startupReconcile } from './handlers';
 import { Logger } from './logger';
 import type { PrMinderConfig } from './config';
 
@@ -90,6 +90,31 @@ describe('isActionsBotPr', () => {
   });
 });
 
+describe('shouldConsiderRevive', () => {
+  const gha = { login: 'github-actions[bot]', type: 'Bot' };
+  const prMinder = { login: 'pr-minder[bot]', type: 'Bot' };
+  const human = { login: 'alice', type: 'User' };
+
+  it('considers opened and synchronize regardless of sender', () => {
+    for (const s of [gha, human, prMinder, undefined]) {
+      expect(shouldConsiderRevive('opened', s)).toBe(true);
+      expect(shouldConsiderRevive('synchronize', s)).toBe(true);
+    }
+  });
+
+  it('considers reopened unless a Bot sent it (our own close+reopen loop guard)', () => {
+    expect(shouldConsiderRevive('reopened', human)).toBe(true);
+    expect(shouldConsiderRevive('reopened', gha)).toBe(false);
+    expect(shouldConsiderRevive('reopened', prMinder)).toBe(false);
+  });
+
+  it('ignores unrelated actions', () => {
+    expect(shouldConsiderRevive('labeled', gha)).toBe(false);
+    expect(shouldConsiderRevive('closed', gha)).toBe(false);
+    expect(shouldConsiderRevive('auto_merge_enabled', human)).toBe(false);
+  });
+});
+
 describe('shouldSkipBranch', () => {
   it('always skips the base branch and gh-pages', () => {
     expect(shouldSkipBranch('main', 'main', [])).toBe(true);
@@ -113,6 +138,7 @@ describe('reviveIfZombie', () => {
     const kv = {
       get: async (k: string) => store.get(k) ?? null,
       put: async (k: string, v: string) => { store.set(k, v); },
+      delete: async (k: string) => { store.delete(k); },
     };
     return { env: { PR_STATE: kv } as any, store };
   }
@@ -131,6 +157,11 @@ describe('reviveIfZombie', () => {
 
   const botPr = (overrides: Record<string, unknown> = {}) =>
     ({ number: 174, draft: false, head: { sha: 'abc' }, user: { login: 'github-actions[bot]' }, ...overrides });
+
+  // A commit-age route for hasWorkflowRuns's sibling lookup. Old enough to be a real zombie, or
+  // brand-new (still within the "too fresh to judge" window).
+  const OLD_DATE = '2020-01-01T00:00:00Z';
+  const freshDate = () => new Date().toISOString();
 
   afterEach(() => vi.unstubAllGlobals());
 
@@ -155,14 +186,42 @@ describe('reviveIfZombie', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('re-checks when the head SHA changed (a touched PR)', async () => {
-    const { env, store } = fakeKV({ 'pr:o/r#174': 'oldsha' });
+  it('reopens the first commit immediately, without a commit-age lookup', async () => {
+    const { env } = fakeKV();
+    const fetchMock = stubFetch([
+      { match: '/actions/runs', status: 200, body: { total_count: 0 } },
+      { match: '/pulls/174', status: 200 },
+    ]);
+    // prev === null (first time we handle this PR) -> revive now; no /commits/ age call is made
+    // (a missing route would throw "unexpected fetch", so this also proves it isn't called).
+    expect(await reviveIfZombie(env, 'o/r', botPr(), 'tok', new Logger())).toBe(true);
+    expect(fetchMock.mock.calls.some(([u]) => u.includes('/commits/'))).toBe(false);
+  });
+
+  it('re-revives a touched PR whose new commit has aged without gaining runs, clearing the reminder', async () => {
+    const { env, store } = fakeKV({ 'pr:o/r#174': 'oldsha', 'recheck:o/r#174': 'ts' });
     stubFetch([
       { match: '/actions/runs', status: 200, body: { total_count: 0 } },
+      { match: '/commits/', status: 200, body: { commit: { committer: { date: OLD_DATE } } } },
       { match: '/pulls/174', status: 200 },
     ]);
     expect(await reviveIfZombie(env, 'o/r', botPr({ head: { sha: 'newsha' } }), 'tok', new Logger())).toBe(true);
     expect(store.get('pr:o/r#174')).toBe('newsha');
+    expect(store.has('recheck:o/r#174')).toBe(false); // verdict recorded -> reminder cleared
+  });
+
+  it('defers a too-fresh follow-up commit and leaves a recheck reminder (the bug fix)', async () => {
+    const { env, store } = fakeKV({ 'pr:o/r#174': 'oldsha' });
+    const fetchMock = stubFetch([
+      { match: '/actions/runs', status: 200, body: { total_count: 0 } },
+      { match: '/commits/', status: 200, body: { commit: { committer: { date: freshDate() } } } },
+    ]);
+    // Simulates pr-minder's own update-branch merge: a brand-new head SHA with no runs yet.
+    expect(await reviveIfZombie(env, 'o/r', botPr({ head: { sha: 'mergesha' } }), 'tok', new Logger())).toBe(false);
+    expect(fetchMock.mock.calls.filter(([u]) => u.includes('/pulls/174'))).toHaveLength(0);
+    // Not recorded (so a later sweep re-evaluates), and a reminder is dropped for that sweep.
+    expect(store.get('pr:o/r#174')).toBe('oldsha');
+    expect(store.has('recheck:o/r#174')).toBe(true);
   });
 
   it('ignores a non-bot PR without any API call or KV write', async () => {

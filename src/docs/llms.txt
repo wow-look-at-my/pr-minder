@@ -1,6 +1,6 @@
 # pr-minder
 
-> pr-minder is a GitHub App (running as a Cloudflare Worker) that keeps pull requests healthy with zero per-repo workflow files. It keeps PR branches up to date with their base, syncs labels with GitHub's native auto-merge, revives "zombie" PRs whose CI never ran, and opens PRs for forgotten branches. It is opt-in and event-driven — no cron and no polling; it keeps only a little dedup state (which PRs it has already checked) in Workers KV.
+> pr-minder is a GitHub App (running as a Cloudflare Worker) that keeps pull requests healthy with zero per-repo workflow files. It keeps PR branches up to date with their base, syncs labels with GitHub's native auto-merge, revives "zombie" PRs whose CI never ran, and opens PRs for forgotten branches. It is opt-in and event-driven, with one lightweight periodic safety sweep that only re-checks PRs it has explicitly flagged (no work, and no GitHub calls, when nothing is pending). It keeps a little dedup state (which PRs it has already checked) in Workers KV.
 
 ## Install
 
@@ -91,8 +91,9 @@ A PR created with a workflow's default `GITHUB_TOKEN` (author `github-actions[bo
 It checks each PR **at most once per commit**, remembering what it has seen in Workers KV (keyed by the PR's head commit): a PR is only evaluated when its current commit hasn't been checked before, so an untouched PR is never re-checked, while new commits (a "touched" PR) are. When does it check?
 
 - **Live events** — a PR being opened, reopened, or pushed to (`synchronize`) is checked immediately.
-- **First time it sees a repo** — on the first webhook of any kind from a repo, it checks that repo's existing open PRs once. This is what revives zombies in repos that were *already* installed before the feature existed (GitHub never re-sends their install event), with no cron, no polling, and no reinstall — the repo's next bit of activity heals it.
+- **First time it sees a repo** — on the first webhook of any kind from a repo, it checks that repo's existing open PRs once. This is what revives zombies in repos that were *already* installed before the feature existed (GitHub never re-sends their install event), with no reinstall needed — the repo's next bit of activity heals it.
 - **On install / adding repos** — it checks the open PRs in the repos being added.
+- **A short safety sweep (every few minutes)** — a brand-new commit that has no workflow runs *yet* is ambiguous (its CI may simply not have registered), so pr-minder waits about a minute before deciding. It flags only that specific PR and a periodic sweep re-checks it once it has aged: if CI showed up it does nothing; if the commit is a genuine zombie it revives it. The sweep does no work and makes no GitHub calls when nothing is flagged. This is also what keeps pr-minder's own branch-update merge from being treated as a zombie.
 
 It will not loop: pr-minder's own reopen comes back as a `reopened` event sent by a bot, which is skipped.
 

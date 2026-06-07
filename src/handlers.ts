@@ -1,7 +1,7 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
-import { checkedSha, markChecked, wasBackfilled, markBackfilled } from './state';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
+import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks } from './state';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -164,12 +164,11 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
 
   // Revive a "zombie" PR — author github-actions[bot] with no workflow runs of its own (created
   // with the default GITHUB_TOKEN, whose events GitHub won't let trigger workflows). Closing+
-  // reopening with our App token fires a fresh event that DOES run them. The KV seen-set keeps this
-  // to once per commit; `synchronize` is included so new commits (a "touch") get re-checked. Skip
-  // reopens we triggered ourselves (Bot sender) so the close+reopen can't loop. If we did reopen,
-  // return — the PR was just closed+reopened, and the fresh event will drive the rest.
-  if (config.autoTriggerWorkflows && ['opened', 'reopened', 'synchronize'].includes(action)
-      && !(action === 'reopened' && p.sender?.type === 'Bot')) {
+  // reopening with our App token fires a fresh event that DOES run them. shouldConsiderRevive picks
+  // the eligible events (skipping our own bot reopen); reviveIfZombie then decides whether to act,
+  // and in particular won't re-close a follow-up commit (e.g. our own update-branch merge) until it
+  // has aged without gaining CI. If we did reopen, return — the fresh event drives the rest.
+  if (config.autoTriggerWorkflows && shouldConsiderRevive(action, p.sender)) {
     if (await reviveIfZombie(env, repo, pr, token, log)) return;
   }
 
@@ -286,29 +285,93 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
   }
 }
 
+// Below this age (seconds) a brand-new commit with no workflow runs is treated as "too fresh to
+// judge" rather than a zombie: its workflows may simply not have registered yet. ~1 minute.
+const REVIVE_MIN_AGE_S = 60;
+
 // Evaluate one PR and revive it if it's a GITHUB_TOKEN "zombie": author github-actions[bot] with
 // no workflow runs for its head commit. Closing+reopening with our App token fires a fresh event
 // that DOES run its workflows. Returns true iff it reopened.
 //
-// KV makes this check-once: skip if we've already evaluated this PR at its current head SHA, and
-// record the SHA afterwards — so a new commit (new SHA) is re-checked but an untouched PR never is.
-// Bot-author-gated, so the one hasWorkflowRuns call is spent only on the PR kind that can be a
-// zombie. (A bot PR always has zero runs until revived, which is exactly why zero runs is the right
-// signal here even on a freshly opened/synchronized PR; non-bot PRs return immediately.) Degrades to
-// "always check, never record" if the KV binding is somehow absent, so it never throws on missing KV.
+// KV makes this check-once per commit: skip if we've already evaluated this PR at its current head
+// SHA. The first commit we handle for a PR (no prior SHA recorded) is revived immediately — a bot
+// PR is born with zero CI, so the reading is trustworthy. A *follow-up* commit with zero runs is
+// only revived once it has aged past REVIVE_MIN_AGE_S (else it's left unrecorded for a later event),
+// so pr-minder's own update-branch merge — which gets CI on its own — isn't close+reopened a second
+// time. Bot-author-gated, so the hasWorkflowRuns/commit-age calls are spent only on PRs that can be
+// a zombie. Degrades to "always check, never record" if the KV binding is somehow absent.
 export async function reviveIfZombie(env: Env, repo: string, pr: any, token: string, log: Logger): Promise<boolean> {
   const sha = pr?.head?.sha;
   if (pr?.draft || !sha || !isActionsBotPr(pr)) return false;
-  if (env.PR_STATE && (await checkedSha(env.PR_STATE, repo, pr.number)) === sha) return false;
+  const prev = env.PR_STATE ? await checkedSha(env.PR_STATE, repo, pr.number) : null;
+  if (prev === sha) return false;
 
   let reopened = false;
   if (!(await hasWorkflowRuns(repo, sha, token, log))) {
+    // No runs. On the first commit we handle for this PR (prev === null), act immediately — a
+    // github-actions[bot] PR is born with zero CI, so that reading is trustworthy right away. Once
+    // we've already handled an earlier commit, a *new* commit with zero runs is ambiguous: it may
+    // just be too fresh for its workflows to have registered. The prime example is pr-minder's own
+    // update-branch merge, which triggers CI natively — close+reopening it would be a needless second
+    // cycle. So for a follow-up commit we re-close/reopen only once it has aged past REVIVE_MIN_AGE_S
+    // and still shows no runs; a still-fresh one is left (not recorded) for a later event to
+    // re-evaluate, by which point its runs have registered and it won't be revived at all.
+    let act = true;
+    if (prev !== null) {
+      const age = await commitAgeSeconds(repo, sha, token, log);
+      act = age !== null && age >= REVIVE_MIN_AGE_S;
+    }
+    if (!act) {
+      log.log(`${repo}#${pr.number}: no runs but follow-up commit too fresh; deferring revive`);
+      // Don't record this SHA. Drop a reminder so the scheduled sweep re-evaluates it once it has
+      // aged — webhooks won't re-fire on their own, and by then its runs have either registered
+      // (so it won't be revived) or it's a genuine zombie (so it will).
+      if (env.PR_STATE) await setRecheck(env.PR_STATE, repo, pr.number);
+      return false;
+    }
     log.log(`${repo}#${pr.number}: zombie PR with no workflow runs; re-triggering (close+reopen)`);
     await retriggerWorkflows(repo, pr.number, token, log);
     reopened = true;
   }
-  if (env.PR_STATE) await markChecked(env.PR_STATE, repo, pr.number, sha);
+  // Recorded a verdict for this commit, so any pending reminder is now resolved.
+  if (env.PR_STATE) {
+    await markChecked(env.PR_STATE, repo, pr.number, sha);
+    await clearRecheck(env.PR_STATE, repo, pr.number);
+  }
   return reopened;
+}
+
+// Scheduled re-check sweep (the Worker's cron entry point). reviveIfZombie defers a follow-up commit
+// that's too fresh to judge by leaving a `recheck:` reminder in KV; this drains those once they've
+// aged. It reads only the reminders — when there are none it makes a single KV list and zero GitHub
+// API calls, so the cron is nearly free at rest (not a poll over all PRs). For each pending PR it
+// mints a token for that repo (cached per run), refetches the PR, and re-runs reviveIfZombie, which
+// now either revives a still-CI-less commit or records it. Reminders for closed/missing PRs are
+// cleared. No-ops without a KV binding.
+export async function runRechecks(env: Env, log: Logger): Promise<void> {
+  if (!env.PR_STATE) return;
+  const pending = await listRechecks(env.PR_STATE);
+  if (pending.length === 0) return;
+  log.log(`recheck sweep: ${pending.length} pending PR(s)`);
+  const tokenByRepo = new Map<string, string | null>();
+  for (const { repo, num } of pending) {
+    try {
+      if (!tokenByRepo.has(repo)) {
+        const instId = await repoInstallationId(repo, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+        tokenByRepo.set(repo, instId === null ? null : await installToken(instId, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log));
+      }
+      const token = tokenByRepo.get(repo) ?? null;
+      if (!token) continue; // no token (repo uninstalled, or a transient error) — leave it; the TTL bounds it
+      const pr = await getPull(repo, num, token, log);
+      if (!pr) continue; // transient fetch failure — leave the reminder for the next sweep
+      if (pr.state !== 'open') { await clearRecheck(env.PR_STATE, repo, num); continue; } // closed/merged — done
+      // reviveIfZombie self-manages the reminder: it clears it on a verdict, or (if still somehow
+      // too fresh) leaves a fresh one for the next sweep.
+      await reviveIfZombie(env, repo, pr, token, log);
+    } catch (e) {
+      log.log(`recheck ${repo}#${num}: ${(e as Error).message}`);
+    }
+  }
 }
 
 // Sweep a repo's open PRs through reviveIfZombie. Used by the install/repos-added handlers and the
@@ -443,6 +506,17 @@ async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinde
 // that account's identity instead and trigger workflows normally.
 export function isActionsBotPr(pr: any): boolean {
   return pr?.user?.login === 'github-actions[bot]';
+}
+
+// Which pull_request actions may trigger a zombie revive. opened / reopened / synchronize all
+// qualify (a new or touched PR may be a CI-less zombie); reviveIfZombie itself then decides whether
+// to act — and the commit-age guard there, not the event sender, is what prevents pr-minder's own
+// update-branch merge from being re-closed. The one event we drop here is a `reopened` we sent
+// ourselves (Bot sender): that's our own close+reopen coming back, and skipping it is the loop guard.
+export function shouldConsiderRevive(action: string, sender: any): boolean {
+  if (!['opened', 'reopened', 'synchronize'].includes(action)) return false;
+  if (action === 'reopened' && sender?.type === 'Bot') return false;
+  return true;
 }
 
 async function prQualifies(pr: any, repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<boolean> {
