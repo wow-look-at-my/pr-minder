@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
 import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks } from './state';
 import type { Logger } from './logger';
 
@@ -204,6 +204,23 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   // Webhook payloads frequently carry stale values ('unknown', 'unstable', or 'blocked'
   // masking 'behind') before GitHub finishes its async mergeability compute.
   log.log(`${tag}: updateBranch (mergeable_state=${pr.mergeable_state})`);
+  await updateBranchUnlessEmpty(repo, pr, pr.base?.sha ?? null, token, log);
+}
+
+// Update a PR's branch with its base, skipping when the merge would introduce nothing. GitHub's
+// update-branch merges base into head whenever head is behind by commit *count* — even when head
+// already contains base's *content* — which leaves an empty "Merge branch ..." commit on the PR.
+// mergeWouldBeEmpty catches that from GitHub's test-merge of the PR; it's safe (a genuine update is
+// never skipped). `baseTipSha` is the current base-branch tip the caller already knows (the push's
+// new head, or the PR payload's base.sha) — it lets mergeWouldBeEmpty confirm the test-merge is
+// current before trusting it.
+async function updateBranchUnlessEmpty(repo: string, pr: any, baseTipSha: string | null, token: string, log: Logger): Promise<void> {
+  const tag = `${repo}#${pr.number}`;
+  if (await mergeWouldBeEmpty(repo, pr, baseTipSha, token, log)) {
+    log.log(`${tag}: skip updateBranch (head already contains base; merge would be empty)`);
+    return;
+  }
+  log.log(`${tag}: updateBranch`);
   await updateBranch(repo, pr.number, token, log);
   log.log(`${tag}: updateBranch ok`);
 }
@@ -226,9 +243,8 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
       continue;
     }
     try {
-      log.log(`${tag}: updateBranch`);
-      await updateBranch(repo, pr.number, token, log);
-      log.log(`${tag}: updateBranch ok`);
+      // p.after is the default branch's new tip (what update-branch would merge in).
+      await updateBranchUnlessEmpty(repo, pr, p.after ?? pr.base?.sha ?? null, token, log);
     } catch (e) {
       log.log(`${tag}: updateBranch failed: ${(e as Error).message}`);
     }

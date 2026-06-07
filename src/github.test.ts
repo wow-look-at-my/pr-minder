@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -336,5 +336,73 @@ describe('updateBranch', () => {
   it('throws on non-422 failures (e.g. 403)', async () => {
     stubFetch(403, { message: 'Resource not accessible by integration' });
     await expect(updateBranch('o/r', 1, 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
+  });
+});
+
+describe('mergeWouldBeEmpty', () => {
+  // Route by URL substring (commitMeta reads .json()), first match wins.
+  function routes(rs: Array<{ match: string; status: number; body: unknown }>) {
+    const fn = vi.fn(async (url: string) => {
+      const route = rs.find((r) => url.includes(r.match));
+      if (!route) throw new Error(`unexpected fetch to ${url}`);
+      const text = typeof route.body === 'string' ? route.body : JSON.stringify(route.body);
+      return { ok: route.status >= 200 && route.status < 300, status: route.status, text: async () => text, json: async () => JSON.parse(text) };
+    });
+    vi.stubGlobal('fetch', fn);
+    return fn;
+  }
+  const pr = { number: 5, head: { sha: 'HEADSHA' }, merge_commit_sha: 'MERGESHA' };
+
+  it('is empty (skip) when the current test-merge has the same tree as head', async () => {
+    // The real b6ad93e1ea case: head already contains base's content, so GitHub's base-into-head
+    // merge yields head's own tree — a 0-diff "Merge branch ..." commit.
+    const fetchMock = routes([
+      { match: '/git/commits/MERGESHA', status: 200, body: { tree: { sha: 'TREE1' }, parents: [{ sha: 'BASETIP' }, { sha: 'HEADSHA' }] } },
+      { match: '/git/commits/HEADSHA', status: 200, body: { tree: { sha: 'TREE1' } } },
+    ]);
+    expect(await mergeWouldBeEmpty('o/r', pr, 'BASETIP', 'tok', new Logger())).toBe(true);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/git/commits/MERGESHA');
+  });
+
+  it('is not empty (update) when the test-merge tree differs from head', async () => {
+    routes([
+      { match: '/git/commits/MERGESHA', status: 200, body: { tree: { sha: 'TREE_merged' }, parents: [{ sha: 'BASETIP' }, { sha: 'HEADSHA' }] } },
+      { match: '/git/commits/HEADSHA', status: 200, body: { tree: { sha: 'TREE_head' } } },
+    ]);
+    expect(await mergeWouldBeEmpty('o/r', pr, 'BASETIP', 'tok', new Logger())).toBe(false);
+  });
+
+  it('does not trust a stale test-merge whose parent is not the current base tip', async () => {
+    // The merge ref still reflects an OLD base; its tree may equal head's, but the current base has
+    // moved and could bring real changes. Must not skip — fall back to updating.
+    const fetchMock = routes([
+      { match: '/git/commits/MERGESHA', status: 200, body: { tree: { sha: 'TREE1' }, parents: [{ sha: 'OLDBASE' }, { sha: 'HEADSHA' }] } },
+    ]);
+    expect(await mergeWouldBeEmpty('o/r', pr, 'NEWBASE', 'tok', new Logger())).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // bails before fetching head's tree
+  });
+
+  it('does not trust a test-merge whose parent is not the current head', async () => {
+    routes([
+      { match: '/git/commits/MERGESHA', status: 200, body: { tree: { sha: 'TREE1' }, parents: [{ sha: 'BASETIP' }, { sha: 'OLDHEAD' }] } },
+    ]);
+    expect(await mergeWouldBeEmpty('o/r', pr, 'BASETIP', 'tok', new Logger())).toBe(false);
+  });
+
+  it('returns false when the PR has no merge_commit_sha yet (mergeability not computed)', async () => {
+    const fetchMock = routes([]);
+    expect(await mergeWouldBeEmpty('o/r', { number: 5, head: { sha: 'HEADSHA' } }, 'BASETIP', 'tok', new Logger())).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('returns false when no base tip is known', async () => {
+    const fetchMock = routes([]);
+    expect(await mergeWouldBeEmpty('o/r', pr, null, 'tok', new Logger())).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('fails safe (false) when the test-merge commit cannot be fetched', async () => {
+    routes([{ match: '/git/commits/MERGESHA', status: 404, body: { message: 'Not Found' } }]);
+    expect(await mergeWouldBeEmpty('o/r', pr, 'BASETIP', 'tok', new Logger())).toBe(false);
   });
 });
