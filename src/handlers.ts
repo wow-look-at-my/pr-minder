@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallationRepos, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
 import { checkedSha, markChecked, wasBackfilled, markBackfilled } from './state';
 import type { Logger } from './logger';
 
@@ -63,6 +63,82 @@ async function maybeEnsureLabelsForRepo(
     await createConfiguredLabels(fullName, config, token, log);
   } catch (e) {
     log.log(`maybeEnsureLabels: ${fullName}: ${(e as Error).message}`);
+  }
+}
+
+// One-shot reconcile across every repo the App is installed on. Run once when the Worker starts up
+// (a fresh isolate after a deploy) and again when the App is installed / repos are added. After
+// that we do NOT poll: the live `labeled`/`unlabeled`/`auto_merge_*` webhooks keep state in sync.
+// The startup pass exists only to catch what happened while pr-minder was a previous version (or
+// down) — e.g. a PR that was labeled but never got auto-merge armed because of a bug now fixed.
+export async function startupReconcile(env: Env, log: Logger): Promise<void> {
+  // Gate on the deploy version so the cross-repo sweep runs once per *deploy*, not once per isolate.
+  // After a deploy many isolates cold-start across the edge and each would otherwise sweep; keying a
+  // KV flag on the Worker version id collapses those to a single trigger. (The module-level guard in
+  // worker.ts already keeps it to once per isolate; this makes it once per version.) Set the flag
+  // before sweeping so a concurrent isolate that loses the race skips instead of duplicating. If
+  // there's no version binding we can't dedup safely (a constant key would block all future
+  // deploys), so we fall back to the per-isolate guard alone.
+  const version = env.CF_VERSION_METADATA?.id;
+  if (env.PR_STATE && version) {
+    const key = `startup:${version}`;
+    if (await env.PR_STATE.get(key)) {
+      log.log(`startupReconcile: already swept for version ${version}`);
+      return;
+    }
+    await env.PR_STATE.put(key, new Date().toISOString());
+  }
+
+  let installs: number[];
+  try {
+    installs = await listInstallations(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  } catch (e) {
+    log.log(`startupReconcile: listInstallations failed: ${(e as Error).message}`);
+    return;
+  }
+  log.log(`startupReconcile: ${installs.length} installation(s)`);
+  for (const id of installs) {
+    try {
+      const token = await installToken(id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+      for (const fullName of await listInstallationRepos(token, log)) {
+        try {
+          const [owner, name] = fullName.split('/');
+          const config = await loadConfig(owner, name, token, log);
+          await reconcileAutoMerge(fullName, config, token, log);
+        } catch (e) {
+          log.log(`startupReconcile: ${fullName}: ${(e as Error).message}`);
+        }
+      }
+    } catch (e) {
+      log.log(`startupReconcile: install ${id}: ${(e as Error).message}`);
+    }
+  }
+}
+
+// Reconcile native auto-merge for a repo's open PRs: every PR that carries an `auto_merge`-mode
+// label but doesn't have auto-merge armed yet gets (re)enabled — and enableAutoMerge merges the PR
+// directly when it's already mergeable and GitHub won't arm it, so a "ready" PR gets merged instead
+// of sitting forever. This is NOT a poll: it runs only on startup and on install (see callers). It's
+// cheap — listOpenPulls already carries each PR's labels and current auto_merge state, so we only
+// spend an enableAutoMerge call on a PR that has the label but isn't armed.
+export async function reconcileAutoMerge(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  const methodByLabel = new Map<string, string>();
+  for (const [name, opts] of Object.entries(config.labels)) {
+    if (opts.mode === 'auto_merge') methodByLabel.set(name, opts.auto_merge_method);
+  }
+  if (methodByLabel.size === 0) return;
+
+  const prs = await listOpenPulls(repo, token, log);
+  for (const pr of prs) {
+    if (pr.draft || pr.auto_merge) continue; // skip drafts and PRs that already have auto-merge armed
+    const label = (pr.labels ?? []).map((l: any) => l.name).find((n: string) => methodByLabel.has(n));
+    if (!label) continue;
+    try {
+      log.log(`${repo}#${pr.number}: reconcile auto-merge (label "${label}")`);
+      await enableAutoMerge(repo, pr.number, pr.node_id, methodByLabel.get(label)!, token, log);
+    } catch (e) {
+      log.log(`${repo}#${pr.number}: reconcile auto-merge failed: ${(e as Error).message}`);
+    }
   }
 }
 
@@ -303,6 +379,7 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(fullName, config, token, log);
+      await reconcileAutoMerge(fullName, config, token, log);
       await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
       await maybeOpenPrsForRepo(fullName, config, token, log);
       if (env.PR_STATE) await markBackfilled(env.PR_STATE, fullName);
@@ -322,6 +399,7 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(repo.full_name, config, token, log);
+      await reconcileAutoMerge(repo.full_name, config, token, log);
       await maybeRetriggerZombiesForRepo(repo.full_name, config, token, env, log);
       await maybeOpenPrsForRepo(repo.full_name, config, token, log);
       if (env.PR_STATE) await markBackfilled(env.PR_STATE, repo.full_name);

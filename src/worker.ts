@@ -1,7 +1,7 @@
 // MIT
 // GitHub App must subscribe to: pull_request, pull_request_review, push
 // Also handles: installation, installation_repositories (auto-delivered to all apps)
-import { handle } from './handlers';
+import { handle, startupReconcile } from './handlers';
 import { GhError } from './github';
 import { Logger } from './logger';
 import { verifyWebhook } from './webhook';
@@ -13,11 +13,26 @@ export interface Env {
   GITHUB_APP_ID: string;
   GITHUB_APP_PRIVATE_KEY: string; // PEM, PKCS8
   WEBHOOK_SECRET: string;
-  PR_STATE: KVNamespace; // zombie-check state: per-PR "checked at SHA" + per-repo backfill flag
+  PR_STATE: KVNamespace; // zombie-check state: per-PR "checked at SHA" + per-repo backfill flag + per-version startup flag
+  // Cloudflare Version Metadata binding: { id, tag, timestamp }. `id` changes per deploy, so it
+  // keys the once-per-deploy gate on the startup auto-merge reconcile. Optional so dev/tests without
+  // the binding still typecheck (the gate then degrades to the per-isolate guard).
+  CF_VERSION_METADATA?: { id: string; tag: string; timestamp: string };
 }
 
+// Reconcile-on-startup, not poll. Each fresh isolate (e.g. after a deploy) runs the cross-repo
+// auto-merge reconcile exactly once, on its first request, in the background via waitUntil — so a
+// redeploy heals any PR whose auto-merge state drifted while an older version was running. Steady
+// state is driven entirely by webhooks; this flag makes the sweep fire once per isolate, never per
+// request.
+let startupSwept = false;
+
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    if (!startupSwept) {
+      startupSwept = true;
+      ctx.waitUntil(startupReconcile(env, new Logger()).catch(() => {}));
+    }
     // GitHub delivers webhooks via POST; GET serves the public documentation.
     if (req.method === 'GET' || req.method === 'HEAD') return serveDocs(req);
     if (req.method !== 'POST') return new Response('nope', { status: 405 });
