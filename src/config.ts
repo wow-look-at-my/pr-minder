@@ -1,5 +1,5 @@
 import stripJsonComments from 'strip-json-comments';
-import { gh } from './github';
+import { gh, GhError } from './github';
 import type { Logger } from './logger';
 
 function parseJsonc(text: string): any {
@@ -47,26 +47,82 @@ export const DEFAULT_LABEL_COLOR = '00FF00';
 
 const DISABLED: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], targetBase: '' } };
 
-export async function loadConfig(owner: string, repo: string, token: string, log: Logger): Promise<PrMinderConfig> {
-  try {
-    const json = await fetchRepoFile(owner, repo, PER_REPO_CONFIG, token, log);
-    if (json !== null) {
-      log.log(`config: per-repo ${owner}/${repo}/${PER_REPO_CONFIG}`);
-      return mergeConfig(parseJsonc(json), null);
-    }
-  } catch (e) { log.log(`config: per-repo fetch failed: ${(e as Error).message}`); }
+// Per-isolate config cache. loadConfig runs on essentially every webhook event (onPR,
+// onPushToDefault, onPushToBranch, the sweeps), and each resolution costs up to two GitHub
+// Contents API calls — the per-repo file, then (the common case, a 404) the org `.github` file.
+// Config changes rarely, so we memoize the resolved result for CONFIG_CACHE_TTL_MS keyed on
+// `owner/repo`. The cache lives for the life of the isolate, exactly like handlers.ts's
+// labelCheckedAt: a cold start just re-resolves once, and a config edit propagates within the TTL.
+// Keyed on owner/repo only because the resolved config is identical regardless of which
+// installation token reads it.
+const CONFIG_CACHE_TTL_MS = 60_000;
+const configCache = new Map<string, { config: PrMinderConfig; expires: number }>();
 
+// Drop all cached config. Exists so tests can isolate cases; there is no production caller.
+export function resetConfigCache(): void {
+  configCache.clear();
+}
+
+export async function loadConfig(owner: string, repo: string, token: string, log: Logger): Promise<PrMinderConfig> {
+  const key = `${owner}/${repo}`;
+  const now = Date.now();
+  const hit = configCache.get(key);
+  if (hit && hit.expires > now) {
+    log.log(`config: cache hit ${key}`);
+    return hit.config;
+  }
+
+  const { config, cacheable } = await resolveConfig(owner, repo, token, log);
+  // Only cache a definitive resolution. A transient fetch failure (5xx, network, throttling)
+  // resolves to DISABLED here, and caching that would make pr-minder ignore the repo for a whole
+  // TTL window; leaving it uncached means the next event retries instead.
+  if (cacheable) configCache.set(key, { config, expires: now + CONFIG_CACHE_TTL_MS });
+  return config;
+}
+
+async function resolveConfig(owner: string, repo: string, token: string, log: Logger): Promise<{ config: PrMinderConfig; cacheable: boolean }> {
+  // A fetch that couldn't reach a definitive answer (anything other than a clean 200/404) makes the
+  // whole resolution non-cacheable: the per-repo file we failed to read might exist, so any result
+  // we fall back to could be wrong. A malformed-JSON file is NOT a fetch failure — it's a definitive
+  // (if broken) state that won't change within the TTL, so it stays cacheable.
+  let cacheable = true;
+
+  let perRepo: string | null = null;
   try {
-    const json = await fetchRepoFile(owner, '.github', ORG_CONFIG, token, log);
-    if (json !== null) {
-      log.log(`config: org-level ${owner}/.github`);
-      const parsed = parseJsonc(json);
-      return mergeConfig(parsed, parsed?.repos?.[repo]);
+    perRepo = await fetchRepoFile(owner, repo, PER_REPO_CONFIG, token, log);
+  } catch (e) {
+    log.log(`config: per-repo fetch failed: ${(e as Error).message}`);
+    cacheable = false;
+  }
+  if (perRepo !== null) {
+    try {
+      const config = mergeConfig(parseJsonc(perRepo), null);
+      log.log(`config: per-repo ${owner}/${repo}/${PER_REPO_CONFIG}`);
+      return { config, cacheable };
+    } catch (e) {
+      log.log(`config: per-repo parse failed: ${(e as Error).message}`);
     }
-  } catch (e) { log.log(`config: org fetch failed: ${(e as Error).message}`); }
+  }
+
+  let orgJson: string | null = null;
+  try {
+    orgJson = await fetchRepoFile(owner, '.github', ORG_CONFIG, token, log);
+  } catch (e) {
+    log.log(`config: org fetch failed: ${(e as Error).message}`);
+    cacheable = false;
+  }
+  if (orgJson !== null) {
+    try {
+      const parsed = parseJsonc(orgJson);
+      log.log(`config: org-level ${owner}/.github`);
+      return { config: mergeConfig(parsed, parsed?.repos?.[repo]), cacheable };
+    } catch (e) {
+      log.log(`config: org parse failed: ${(e as Error).message}`);
+    }
+  }
 
   log.log(`config: none found, disabled`);
-  return DISABLED;
+  return { config: DISABLED, cacheable };
 }
 
 function defaultLabel(): LabelOptions {
@@ -117,10 +173,14 @@ export function mergeConfig(top: any, override: any): PrMinderConfig {
   return result;
 }
 
+// Returns the file's decoded content, or null when it definitively doesn't exist (404).
+// Any other non-2xx is a transient failure (5xx, throttling, auth blip) — throw so the caller
+// treats the resolution as non-cacheable and retries on the next event, rather than mistaking it
+// for "no config".
 async function fetchRepoFile(owner: string, repo: string, path: string, token: string, log: Logger): Promise<string | null> {
   const r = await gh(`/repos/${owner}/${repo}/contents/${path}`, token, log);
   if (r.status === 404) return null;
-  if (!r.ok) return null;
+  if (!r.ok) throw new GhError(r.status, await r.text());
   const data: any = await r.json();
   if (data.encoding !== 'base64') return null;
   return atob(data.content.replace(/\s/g, ''));

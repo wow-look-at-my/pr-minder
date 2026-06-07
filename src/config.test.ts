@@ -1,5 +1,23 @@
-import { describe, it, expect } from 'vitest';
-import { mergeConfig, DEFAULT_LABEL_COLOR } from './config';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mergeConfig, loadConfig, resetConfigCache, DEFAULT_LABEL_COLOR } from './config';
+import { Logger } from './logger';
+
+// A GitHub Contents API response carrying base64-encoded file content.
+const contentsBody = (text: string) => ({ encoding: 'base64', content: btoa(text) });
+
+// Route fetches by URL substring so we can answer the per-repo and org `.github` lookups
+// independently and count how many calls each test actually makes.
+function stubContents(routes: Array<{ match: string; status: number; body?: unknown }>) {
+  const fn = vi.fn(async (url: string) => {
+    const route = routes.find((r) => (url as string).includes(r.match));
+    const status = route?.status ?? 404;
+    const body = route?.body;
+    const text = typeof body === 'string' ? body : JSON.stringify(body ?? {});
+    return { ok: status >= 200 && status < 300, status, json: async () => JSON.parse(text), text: async () => text };
+  });
+  vi.stubGlobal('fetch', fn);
+  return fn;
+}
 
 describe('mergeConfig', () => {
   it('returns empty triggers and labels when top has no known fields', () => {
@@ -219,5 +237,93 @@ describe('mergeConfig', () => {
       expect(cfg.labels.foo.mode).toBe('auto_update');
       expect(cfg.labels.foo.color).toBe('aaaaaa');
     });
+  });
+});
+
+describe('loadConfig caching', () => {
+  beforeEach(() => resetConfigCache());
+  afterEach(() => vi.unstubAllGlobals());
+
+  const log = () => new Logger();
+  const PER_REPO = 'o/r/contents/.github/pr-minder.jsonc';
+  const ORG = 'o/.github/contents/.github/config/pr-minder/pr-minder.jsonc';
+
+  it('resolves once and serves the cache on subsequent calls within the TTL', async () => {
+    const fetchMock = stubContents([
+      { match: PER_REPO, status: 404 },
+      { match: ORG, status: 200, body: contentsBody('{ "auto_trigger_workflows": true }') },
+    ]);
+
+    const first = await loadConfig('o', 'r', 'tok', log());
+    expect(first.autoTriggerWorkflows).toBe(true);
+    const callsAfterFirst = fetchMock.mock.calls.length; // 2: per-repo 404 + org 200
+
+    const second = await loadConfig('o', 'r', 'tok', log());
+    expect(second).toBe(first); // same cached object, no re-resolution
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst); // no new fetches
+  });
+
+  it('caches the common "no config" miss so a config-less repo stops hitting the API', async () => {
+    const fetchMock = stubContents([
+      { match: PER_REPO, status: 404 },
+      { match: ORG, status: 404 },
+    ]);
+
+    await loadConfig('o', 'r', 'tok', log());
+    expect(fetchMock.mock.calls.length).toBe(2);
+    await loadConfig('o', 'r', 'tok', log());
+    expect(fetchMock.mock.calls.length).toBe(2); // served from cache, not re-fetched
+  });
+
+  it('re-resolves after the TTL expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = stubContents([
+        { match: PER_REPO, status: 404 },
+        { match: ORG, status: 404 },
+      ]);
+
+      await loadConfig('o', 'r', 'tok', log());
+      expect(fetchMock.mock.calls.length).toBe(2);
+
+      vi.advanceTimersByTime(61_000); // past the 60s TTL
+      await loadConfig('o', 'r', 'tok', log());
+      expect(fetchMock.mock.calls.length).toBe(4); // fetched again
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does NOT cache a transient fetch failure (so the next event retries)', async () => {
+    const fetchMock = stubContents([
+      { match: PER_REPO, status: 404 },
+      { match: ORG, status: 500, body: 'upstream boom' },
+    ]);
+
+    const first = await loadConfig('o', 'r', 'tok', log());
+    expect(first.autoTriggerWorkflows).toBe(false); // degraded to disabled
+    expect(fetchMock.mock.calls.length).toBe(2);
+
+    // GitHub recovers; the second call must re-resolve and pick up the real config.
+    stubContents([
+      { match: PER_REPO, status: 404 },
+      { match: ORG, status: 200, body: contentsBody('{ "auto_trigger_workflows": true }') },
+    ]);
+    const second = await loadConfig('o', 'r', 'tok', log());
+    expect(second.autoTriggerWorkflows).toBe(true);
+  });
+
+  it('a per-repo file short-circuits the org lookup and is cached', async () => {
+    const fetchMock = stubContents([
+      { match: PER_REPO, status: 200, body: contentsBody('{ "auto_trigger_workflows": true }') },
+      { match: ORG, status: 200, body: contentsBody('{ "auto_trigger_workflows": false }') },
+    ]);
+
+    const cfg = await loadConfig('o', 'r', 'tok', log());
+    expect(cfg.autoTriggerWorkflows).toBe(true);
+    expect(fetchMock.mock.calls.length).toBe(1); // org never queried
+
+    await loadConfig('o', 'r', 'tok', log());
+    expect(fetchMock.mock.calls.length).toBe(1); // cached
   });
 });
