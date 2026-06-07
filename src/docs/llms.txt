@@ -69,6 +69,8 @@ A map of label name to per-label settings:
 
 With `mode: "auto_merge"`, adding the label arms GitHub's native auto-merge and removing it disarms it; toggling auto-merge from the GitHub UI adds/removes the label to match. Whenever GitHub won't arm native auto-merge, pr-minder merges the PR directly using `auto_merge_method` — this covers both an already-mergeable PR (GitHub refuses auto-merge on a "clean" PR) and a repo that hasn't enabled "Allow auto-merge" in its settings, so the label still merges your PRs there. Branch protection still gates every merge, and a PR that isn't mergeable yet is left untouched. (For the "wait for checks, then merge" behavior in a repo without native auto-merge, enable "Allow auto-merge" in the repo's Settings; pr-minder uses native auto-merge whenever the repo allows it.)
 
+Day to day this is driven by the `labeled` webhook, so it acts the moment you add the label. As a safety net (not a poll), pr-minder also re-scans every installed repo's open PRs once **on startup** — i.e. after each redeploy — and again when it's installed or repos are added, arming auto-merge on any labeled PR that isn't armed yet. A PR labeled while an older version was running gets healed on the next redeploy.
+
 ```jsonc
 {
   "auto_label_pr": {

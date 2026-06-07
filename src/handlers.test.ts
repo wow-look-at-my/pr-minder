@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie } from './handlers';
+import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie, reconcileAutoMerge } from './handlers';
 import { Logger } from './logger';
+import type { PrMinderConfig } from './config';
 
 const noApprovers = async () => new Set<string>();
 const approvers = (...names: string[]) => async () => new Set(names);
@@ -187,5 +188,64 @@ describe('reviveIfZombie', () => {
     expect(await reviveIfZombie(env, 'o/r', botPr({ head: {} }), 'tok', new Logger())).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(store.size).toBe(0);
+  });
+});
+
+describe('reconcileAutoMerge', () => {
+  // Route fetch by URL substring. listOpenPulls reads r.json(); enableAutoMerge's graphql reads r.text().
+  function stubFetch(routes: Array<{ match: string; status: number; body?: unknown }>) {
+    const fn = vi.fn(async (url: string, _init?: any) => {
+      const route = routes.find((r) => url.includes(r.match));
+      if (!route) throw new Error(`unexpected fetch to ${url}`);
+      const text = JSON.stringify(route.body ?? {});
+      return { ok: route.status >= 200 && route.status < 300, status: route.status, text: async () => text, json: async () => JSON.parse(text) };
+    });
+    vi.stubGlobal('fetch', fn);
+    return fn;
+  }
+
+  const label = (name: string) => ({ name });
+  const cfg = (labels: PrMinderConfig['labels']): PrMinderConfig =>
+    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], targetBase: '' } });
+  const autoMergeLabel = { auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode: 'auto_merge' as const, auto_merge_method: 'squash' as const };
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('enables auto-merge only for non-draft, unarmed PRs that carry an auto_merge label', async () => {
+    const prs = [
+      { number: 1, draft: false, auto_merge: null, node_id: 'PR1', labels: [label('ship')] },        // -> enable
+      { number: 2, draft: false, auto_merge: { enabled_by: {} }, node_id: 'PR2', labels: [label('ship')] }, // already armed -> skip
+      { number: 3, draft: false, auto_merge: null, node_id: 'PR3', labels: [label('other')] },        // no auto_merge label -> skip
+      { number: 4, draft: true, auto_merge: null, node_id: 'PR4', labels: [label('ship')] },          // draft -> skip
+    ];
+    const fetchMock = stubFetch([
+      { match: '/pulls?state=open', status: 200, body: prs },
+      { match: '/graphql', status: 200, body: { data: { enablePullRequestAutoMerge: { pullRequest: { number: 1 } } } } },
+    ]);
+    await reconcileAutoMerge('o/r', cfg({ ship: autoMergeLabel }), 'tok', new Logger());
+
+    const graphqlCalls = fetchMock.mock.calls.filter(([u]) => u.includes('/graphql'));
+    expect(graphqlCalls).toHaveLength(1);
+    expect(JSON.parse(graphqlCalls[0][1].body).variables.pullRequestId).toBe('PR1');
+  });
+
+  it('does nothing (no API calls) when no auto_merge labels are configured', async () => {
+    const fetchMock = stubFetch([]);
+    await reconcileAutoMerge('o/r', cfg({ x: { ...autoMergeLabel, mode: 'auto_update' } }), 'tok', new Logger());
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps going past one PR whose enable throws (each PR is isolated)', async () => {
+    const prs = [
+      { number: 1, draft: false, auto_merge: null, node_id: 'PR1', labels: [label('ship')] },
+      { number: 2, draft: false, auto_merge: null, node_id: 'PR2', labels: [label('ship')] },
+    ];
+    // graphql returns 500 -> enableAutoMerge throws GhError; reconcile must catch and continue.
+    const fetchMock = stubFetch([
+      { match: '/pulls?state=open', status: 200, body: prs },
+      { match: '/graphql', status: 500, body: 'boom' },
+    ]);
+    await expect(reconcileAutoMerge('o/r', cfg({ ship: autoMergeLabel }), 'tok', new Logger())).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls.filter(([u]) => u.includes('/graphql'))).toHaveLength(2);
   });
 });

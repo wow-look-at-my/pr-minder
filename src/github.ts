@@ -214,6 +214,26 @@ export async function fetchApprovers(repo: string, num: number, token: string, l
   return new Set([...latest].filter(([, state]) => state === 'APPROVED').map(([u]) => u));
 }
 
+// Every installation of the App, by id, following pagination. Authenticates as the App itself
+// (JWT, not an installation token) since /app/installations is an App-level endpoint. Returns []
+// on a query error so a startup sweep degrades to a no-op rather than throwing.
+export async function listInstallations(appId: string, privateKey: string, log: Logger): Promise<number[]> {
+  const jwt = await appJWT(appId, privateKey);
+  const ids: number[] = [];
+  let page = 1;
+  for (;;) {
+    const r = await fetch(`https://api.github.com/app/installations?per_page=100&page=${page}`, {
+      headers: { authorization: `Bearer ${jwt}`, accept: 'application/vnd.github+json', 'user-agent': 'pr-minder' },
+    });
+    if (!r.ok) { log.log(`listInstallations: ${r.status}`); break; }
+    const data: any[] = await r.json();
+    for (const inst of data) ids.push(inst.id);
+    if (data.length < 100) break;
+    page++;
+  }
+  return ids;
+}
+
 export async function listInstallationRepos(token: string, log: Logger): Promise<string[]> {
   const repos: string[] = [];
   let page = 1;

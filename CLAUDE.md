@@ -6,9 +6,9 @@ Cloudflare Worker (TypeScript) that acts as a GitHub App webhook handler for kee
 
 ```
 src/
-  worker.ts     Entry point: Cloudflare Worker fetch handler. GET/HEAD -> serveDocs(); POST -> webhook
+  worker.ts     Entry point: Cloudflare Worker fetch handler. GET/HEAD -> serveDocs(); POST -> webhook. On each isolate's first request it kicks startupReconcile() once via ctx.waitUntil (reconcile-on-startup, not polling)
   webhook.ts    verifyWebhook(): HMAC-SHA256 check of x-hub-signature-256 (its own module so tests don't pull in worker.ts's baked-in docs)
-  handlers.ts   Event dispatch: handle(), onPR(), onPushToDefault(), onPushToBranch(), onInstallation(), onReposAdded(), prQualifies(), isActionsBotPr(), reviveIfZombie(), maybeBackfillRepo(), shouldSkipBranch()
+  handlers.ts   Event dispatch: handle(), onPR(), onPushToDefault(), onPushToBranch(), onInstallation(), onReposAdded(), prQualifies(), isActionsBotPr(), reviveIfZombie(), maybeBackfillRepo(), startupReconcile(), reconcileAutoMerge(), shouldSkipBranch()
   config.ts     Config loading: loadConfig(), PrMinderConfig type
   state.ts      Workers KV access for the zombie check: per-PR "checked at SHA" markers + per-repo backfill flag (checkedSha/markChecked, wasBackfilled/markBackfilled)
   github.ts     GitHub API: auth (JWT/install token), REST helpers
@@ -76,6 +76,8 @@ Triggers (no cron, no polling):
 - Live `pull_request` **opened / reopened / synchronize** → `reviveIfZombie` on that PR (`synchronize` included so new commits get re-checked). Skips reopens we sent ourselves (`sender.type === 'Bot'`) so close+reopen can't loop; if it reopened, `onPR` returns and the fresh event drives the rest.
 - **First webhook from a repo** → `maybeBackfillRepo` (run from the opportunistic per-event block in `handle()`): the event-driven "check at least once" for repos installed before the feature existed (GitHub never re-sends their install event). On a repo's first event of any kind it sweeps the repo's open PRs once and sets a `backfill:{repo}` KV flag; every later event is then a single KV read.
 - `installation`/`installation_repositories` → the same `maybeRetriggerZombiesForRepo` sweep for the install's repos, then sets the backfill flag.
+
+Auto-merge reconcile (also no cron, no polling — startup + install only): `reconcileAutoMerge(repo, config, token)` re-scans a repo's open PRs and (re)enables auto-merge on any that carry an `auto_merge`-mode label but aren't armed (`enableAutoMerge` direct-merges a PR that's already mergeable, so a "ready" PR gets merged instead of sitting forever). It pre-filters on the `auto_merge`/`labels`/`draft` fields already in the `listOpenPulls` payload, so it only spends an `enableAutoMerge` call on a labeled-but-unarmed PR. It runs in exactly two places: (1) **Worker startup** — `startupReconcile(env)` is fired once per isolate from `worker.ts` (`ctx.waitUntil`, guarded by a module flag) and sweeps **every** installation (`listInstallations` → per-install token → `listInstallationRepos` → `reconcileAutoMerge`), so a redeploy heals PRs whose auto-merge state drifted under an older/buggy version; (2) **install / repos-added** — `reconcileAutoMerge` runs alongside the other sweeps in `onInstallation`/`onReposAdded`. Steady state is driven entirely by the live `labeled`/`unlabeled`/`auto_merge_enabled`/`auto_merge_disabled` webhooks — there is deliberately **no** per-event re-scan (that would hammer the API; the webhook already says what changed).
 
 `maybeRetriggerZombiesForRepo` pre-filters open PRs to bot-authored ones (free, from `listOpenPulls`) before `reviveIfZombie` spends a KV read / API call, so re-sweeping an already-checked repo is nearly free; each PR is wrapped in try/catch. Cost is ~1 API call per *bot-authored* open PR not yet seen at its current SHA (App tokens get 5,000–12,500 req/hr).
 
