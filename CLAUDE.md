@@ -9,7 +9,7 @@ src/
   worker.ts     Entry point: Cloudflare Worker fetch handler. GET/HEAD -> serveDocs(); POST -> webhook. On each isolate's first request it kicks startupReconcile() once via ctx.waitUntil (reconcile-on-startup, not polling)
   webhook.ts    verifyWebhook(): HMAC-SHA256 check of x-hub-signature-256 (its own module so tests don't pull in worker.ts's baked-in docs)
   handlers.ts   Event dispatch: handle(), onPR(), onPushToDefault(), onPushToBranch(), onInstallation(), onReposAdded(), prQualifies(), isActionsBotPr(), reviveIfZombie(), maybeBackfillRepo(), startupReconcile(), reconcileAutoMerge(), shouldSkipBranch()
-  config.ts     Config loading: loadConfig(), PrMinderConfig type
+  config.ts     Config loading: loadConfig() (memoized per owner/repo for 60s per isolate via resolveConfig + configCache), resetConfigCache() (tests only), PrMinderConfig type
   state.ts      Workers KV access for the zombie check: per-PR "checked at SHA" markers + per-repo backfill flag (checkedSha/markChecked, wasBackfilled/markBackfilled)
   github.ts     GitHub API: auth (JWT/install token), REST helpers
   docs/         Doc sources: llms.txt (the content) and index.html (a self-contained page that fetches /llms.txt and renders it). *.gz are generated, git-ignored
@@ -55,6 +55,8 @@ Set via `wrangler secret put <NAME>`:
 1. `{repo}/.github/pr-minder.jsonc` — per-repo (highest priority)
 2. `{org}/.github` repo, `.github/config/pr-minder/pr-minder.jsonc` → `repos.{repo}` field for per-repo overrides, top-level for org defaults
 3. No config found → everything disabled (opt-in design; nothing fires by default)
+
+`loadConfig` runs on essentially every webhook event and each resolution is up to two Contents API calls (per-repo file, then the org `.github` file — the common case is a 404 + a hit/404). To avoid hammering the API for config that rarely changes, the resolved result is **memoized per `owner/repo` for 60s** (`CONFIG_CACHE_TTL_MS`) in a module-scope `Map` — same per-isolate-lifetime pattern as `handlers.ts`'s `labelCheckedAt`. Consequences: a config edit takes up to 60s to take effect, and the cache key is `owner/repo` only (the resolved config is identical regardless of which install token reads it). Only **definitive** resolutions are cached: a transient fetch failure (5xx/throttling/network — `fetchRepoFile` throws on any non-2xx that isn't a 404) degrades to "disabled" for that one event but is **not** cached, so the next event retries instead of being stuck with an empty config for a full TTL. A 404 (file absent) and a malformed-JSON file are definitive and *are* cached.
 
 ## Config shape
 
