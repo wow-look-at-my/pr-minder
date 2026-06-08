@@ -1,7 +1,9 @@
-// Workers KV state for the zombie check. Three kinds of key:
+// Workers KV state for the zombie check. Four kinds of key:
 //   pr:{repo}#{num}        -> the head SHA we last evaluated that PR at
 //   backfill:{repo}        -> set once we've swept a repo's pre-existing PRs
 //   recheck:{repo}#{num}   -> a self-set "re-check this PR later" reminder (see setRecheck)
+//   swept:{owner}          -> a short-lived per-owner cooldown for the auto-merge backstop, so it
+//                             doesn't re-search on every webhook (see markSwept/recentlySwept)
 // The per-PR marker is what makes the check "once per commit": a PR is evaluated only when its
 // current head SHA differs from what's stored (new PR, or new commits = a "touched" PR), and the
 // SHA is recorded afterwards. The backfill flag makes the first-webhook sweep of an already-
@@ -13,6 +15,7 @@ const backfillKey = (repo: string) => `backfill:${repo}`;
 const RECHECK_PREFIX = 'recheck:';
 const recheckKey = (repo: string, num: number) => `${RECHECK_PREFIX}${repo}#${num}`;
 const RECHECK_TTL_S = 86400; // a reminder self-expires after a day if a sweep never clears it
+const sweptKey = (owner: string) => `swept:${owner}`;
 
 export async function checkedSha(kv: KVNamespace, repo: string, num: number): Promise<string | null> {
   return kv.get(prKey(repo, num));
@@ -63,4 +66,18 @@ export async function listRechecks(kv: KVNamespace): Promise<Array<{ repo: strin
     cursor = res.cursor;
   }
   return out;
+}
+
+// Per-owner cooldown for the auto-merge backstop (reconcileInstall). The backstop is cheap (a label
+// search plus a handful of GitHub calls), but GitHub's search API is rate-limited (~30/min), so we
+// don't want to run it on every webhook for a busy owner. markSwept records "owner just backstopped"
+// with a TTL; recentlySwept gates the next webhook-driven run. The cron sweep ignores this (it's the
+// reliable periodic pass). KV is eventually consistent, so two isolates may occasionally both run —
+// harmless, since reconcileInstall is idempotent. A missing marker just means "go ahead and run".
+export async function markSwept(kv: KVNamespace, owner: string, cooldownS: number): Promise<void> {
+  await kv.put(sweptKey(owner), new Date().toISOString(), { expirationTtl: cooldownS });
+}
+
+export async function recentlySwept(kv: KVNamespace, owner: string): Promise<boolean> {
+  return (await kv.get(sweptKey(owner))) !== null;
 }

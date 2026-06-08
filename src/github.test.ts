@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, searchPrsByLabel, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -259,6 +259,44 @@ describe('listOpenPulls', () => {
   it('returns [] on a query error, so the sweep degrades to a no-op', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => [] })));
     expect(await listOpenPulls('o/r', 'tok', new Logger())).toEqual([]);
+  });
+});
+
+describe('searchPrsByLabel', () => {
+  it('searches open non-draft PRs by label and parses repo + number from each item', async () => {
+    const items = [
+      { number: 174, repository_url: 'https://api.github.com/repos/PazerOP/UE553' },
+      { number: 80, repository_url: 'https://api.github.com/repos/PazerOP/scratch' },
+    ];
+    const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, json: async () => ({ total_count: 2, items }) }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const hits = await searchPrsByLabel('auto-pr-merge', 'tok', new Logger());
+    expect(hits).toEqual([
+      { repo: 'PazerOP/UE553', number: 174 },
+      { repo: 'PazerOP/scratch', number: 80 },
+    ]);
+    // The query restricts to open, non-draft PRs carrying the label (the actionable set).
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toContain('/search/issues?q=');
+    expect(decodeURIComponent(url)).toContain('is:pr is:open draft:false label:"auto-pr-merge"');
+  });
+
+  it('returns [] on a query error so the backstop just skips this pass', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 403, json: async () => ({}) })));
+    expect(await searchPrsByLabel('x', 'tok', new Logger())).toEqual([]);
+  });
+
+  it('follows pagination until a short page', async () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({ number: i + 1, repository_url: 'https://api.github.com/repos/o/r' }));
+    const fetchMock = vi.fn(async (url: string) => ({
+      ok: true, status: 200,
+      json: async () => ({ items: url.includes('page=2') ? [{ number: 101, repository_url: 'https://api.github.com/repos/o/r' }] : full }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const hits = await searchPrsByLabel('ship', 'tok', new Logger());
+    expect(hits).toHaveLength(101);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -58,9 +58,18 @@ const DISABLED: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflow
 const CONFIG_CACHE_TTL_MS = 60_000;
 const configCache = new Map<string, { config: PrMinderConfig; expires: number }>();
 
+// Per-isolate cache of the *org-level* config file, keyed on `owner` alone. The org `.github` file
+// (ORG_CONFIG) is identical for every repo in an org, but the resolved-config cache above is keyed
+// on `owner/repo`, so a sweep across an org's repos would otherwise re-fetch that one shared file
+// once per repo (the dominant cost of a cross-repo reconcile). Memoizing the parsed org JSON by
+// owner collapses that to a single fetch per owner per TTL. Stores the parsed JSON (or null when the
+// file is definitively absent/malformed); a transient fetch failure is NOT stored (so it retries).
+const orgConfigCache = new Map<string, { parsed: any; expires: number }>();
+
 // Drop all cached config. Exists so tests can isolate cases; there is no production caller.
 export function resetConfigCache(): void {
   configCache.clear();
+  orgConfigCache.clear();
 }
 
 export async function loadConfig(owner: string, repo: string, token: string, log: Logger): Promise<PrMinderConfig> {
@@ -78,6 +87,17 @@ export async function loadConfig(owner: string, repo: string, token: string, log
   // TTL window; leaving it uncached means the next event retries instead.
   if (cacheable) configCache.set(key, { config, expires: now + CONFIG_CACHE_TTL_MS });
   return config;
+}
+
+// The owner-level (org `.github`) config, with no per-repo file or per-repo override applied. The
+// auto-merge backstop (reconcileInstall) uses this to learn which labels are auto_merge-mode so it
+// can search the whole installation for them — a per-repo resolution would defeat the point. Reads
+// the owner-cached org file (so it's a single fetch per owner per TTL), and degrades to DISABLED when
+// the org file is absent or unreadable. Per-repo label overrides aren't reflected here; the live
+// event path still applies them, this is only the org-wide backstop's view.
+export async function loadOwnerConfig(owner: string, token: string, log: Logger): Promise<PrMinderConfig> {
+  const { parsed } = await loadOrgConfig(owner, token, log);
+  return parsed ? mergeConfig(parsed, null) : DISABLED;
 }
 
 async function resolveConfig(owner: string, repo: string, token: string, log: Logger): Promise<{ config: PrMinderConfig; cacheable: boolean }> {
@@ -104,25 +124,49 @@ async function resolveConfig(owner: string, repo: string, token: string, log: Lo
     }
   }
 
-  let orgJson: string | null = null;
-  try {
-    orgJson = await fetchRepoFile(owner, '.github', ORG_CONFIG, token, log);
-  } catch (e) {
-    log.log(`config: org fetch failed: ${(e as Error).message}`);
-    cacheable = false;
-  }
-  if (orgJson !== null) {
-    try {
-      const parsed = parseJsonc(orgJson);
-      log.log(`config: org-level ${owner}/.github`);
-      return { config: mergeConfig(parsed, parsed?.repos?.[repo]), cacheable };
-    } catch (e) {
-      log.log(`config: org parse failed: ${(e as Error).message}`);
-    }
+  const { parsed, ok } = await loadOrgConfig(owner, token, log);
+  if (!ok) cacheable = false;
+  if (parsed !== null) {
+    log.log(`config: org-level ${owner}/.github`);
+    return { config: mergeConfig(parsed, parsed?.repos?.[repo]), cacheable };
   }
 
   log.log(`config: none found, disabled`);
   return { config: DISABLED, cacheable };
+}
+
+// Fetch + parse the org-level config file for `owner`, memoized by owner (see orgConfigCache). The
+// org file is shared by every repo in the owner, so this is what lets a cross-repo sweep read it
+// once instead of once per repo. Returns { parsed, ok }: `parsed` is the parsed JSON or null (file
+// absent or malformed — both definitive, so they're cached); `ok` is false only on a transient
+// fetch failure (not cached, and signals the caller to treat the whole resolution as non-cacheable).
+async function loadOrgConfig(owner: string, token: string, log: Logger): Promise<{ parsed: any; ok: boolean }> {
+  const now = Date.now();
+  const hit = orgConfigCache.get(owner);
+  if (hit && hit.expires > now) {
+    log.log(`config: org cache hit ${owner}`);
+    return { parsed: hit.parsed, ok: true };
+  }
+
+  let orgJson: string | null;
+  try {
+    orgJson = await fetchRepoFile(owner, '.github', ORG_CONFIG, token, log);
+  } catch (e) {
+    log.log(`config: org fetch failed: ${(e as Error).message}`);
+    return { parsed: null, ok: false }; // transient — don't cache, force a retry next event
+  }
+
+  let parsed: any = null;
+  if (orgJson !== null) {
+    try {
+      parsed = parseJsonc(orgJson);
+    } catch (e) {
+      log.log(`config: org parse failed: ${(e as Error).message}`);
+      parsed = null; // malformed is definitive (won't change within the TTL) — cache as "no config"
+    }
+  }
+  orgConfigCache.set(owner, { parsed, expires: now + CONFIG_CACHE_TTL_MS });
+  return { parsed, ok: true };
 }
 
 function defaultLabel(): LabelOptions {

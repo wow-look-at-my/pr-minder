@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, startupReconcile } from './handlers';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile } from './handlers';
 import { Logger } from './logger';
-import type { PrMinderConfig } from './config';
+import { resetConfigCache, type PrMinderConfig } from './config';
 
 const noApprovers = async () => new Set<string>();
 const approvers = (...names: string[]) => async () => new Set(names);
@@ -306,6 +306,61 @@ describe('reconcileAutoMerge', () => {
     ]);
     await expect(reconcileAutoMerge('o/r', cfg({ ship: autoMergeLabel }), 'tok', new Logger())).resolves.toBeUndefined();
     expect(fetchMock.mock.calls.filter(([u]) => u.includes('/graphql'))).toHaveLength(2);
+  });
+});
+
+describe('reconcileInstall', () => {
+  // Routes fetches by URL substring, serving both .json() (config/search/getPull) and .text() (graphql).
+  function routeFetch(routes: Array<{ match: string; status: number; body: unknown }>) {
+    const fn = vi.fn(async (url: string, _init?: any) => {
+      const route = routes.find((r) => url.includes(r.match));
+      if (!route) throw new Error(`unexpected fetch to ${url}`);
+      const text = typeof route.body === 'string' ? route.body : JSON.stringify(route.body);
+      return { ok: route.status >= 200 && route.status < 300, status: route.status, text: async () => text, json: async () => JSON.parse(text) };
+    });
+    vi.stubGlobal('fetch', fn);
+    return fn;
+  }
+  // The owner config lives in the org `.github` repo; encode it as the Contents API would.
+  const orgCfg = (obj: unknown) => ({ match: '/repos/o/.github/contents/', status: 200, body: { encoding: 'base64', content: btoa(JSON.stringify(obj)) } });
+  const autoMergeCfg = { auto_label_pr: { 'auto-pr-merge': { mode: 'auto_merge', auto_merge_method: 'squash' } } };
+
+  beforeEach(() => resetConfigCache()); // loadOwnerConfig memoizes the org file per owner
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('searches the owner for each auto_merge label and arms an unarmed, open, non-draft hit', async () => {
+    const fetchMock = routeFetch([
+      orgCfg(autoMergeCfg),
+      { match: '/search/issues', status: 200, body: { items: [{ number: 1, repository_url: 'https://api.github.com/repos/o/r' }] } },
+      { match: '/repos/o/r/pulls/1', status: 200, body: { number: 1, state: 'open', draft: false, auto_merge: null, node_id: 'PR1' } },
+      { match: '/graphql', status: 200, body: { data: { enablePullRequestAutoMerge: { pullRequest: { number: 1 } } } } },
+    ]);
+    await reconcileInstall('o', 'tok', new Logger(), { calls: 50 });
+    const graphql = fetchMock.mock.calls.filter(([u]) => (u as string).includes('/graphql'));
+    expect(graphql).toHaveLength(1);
+    expect(JSON.parse((graphql[0][1] as any).body).variables.pullRequestId).toBe('PR1');
+  });
+
+  it('skips a PR that is already armed (no enable call)', async () => {
+    const fetchMock = routeFetch([
+      orgCfg(autoMergeCfg),
+      { match: '/search/issues', status: 200, body: { items: [{ number: 1, repository_url: 'https://api.github.com/repos/o/r' }] } },
+      { match: '/repos/o/r/pulls/1', status: 200, body: { number: 1, state: 'open', draft: false, auto_merge: { enabled_by: {} }, node_id: 'PR1' } },
+    ]);
+    await reconcileInstall('o', 'tok', new Logger(), { calls: 50 });
+    expect(fetchMock.mock.calls.some(([u]) => (u as string).includes('/graphql'))).toBe(false);
+  });
+
+  it('does nothing (no search) when the owner config has no auto_merge labels', async () => {
+    const fetchMock = routeFetch([orgCfg({ auto_label_pr: { 'auto-pr-update': { mode: 'auto_update' } } })]);
+    await reconcileInstall('o', 'tok', new Logger(), { calls: 50 });
+    expect(fetchMock.mock.calls.some(([u]) => (u as string).includes('/search/issues'))).toBe(false);
+  });
+
+  it('respects the call budget: an exhausted budget stops before searching', async () => {
+    const fetchMock = routeFetch([orgCfg(autoMergeCfg)]);
+    await reconcileInstall('o', 'tok', new Logger(), { calls: 1 }); // spent by loadOwnerConfig
+    expect(fetchMock.mock.calls.some(([u]) => (u as string).includes('/search/issues'))).toBe(false);
   });
 });
 

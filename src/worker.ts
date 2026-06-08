@@ -1,7 +1,7 @@
 // MIT
 // GitHub App must subscribe to: pull_request, pull_request_review, push
 // Also handles: installation, installation_repositories (auto-delivered to all apps)
-import { handle, startupReconcile, runRechecks } from './handlers';
+import { handle, startupReconcile, runRechecks, reconcileAllInstalls } from './handlers';
 import { GhError } from './github';
 import { Logger } from './logger';
 import { verifyWebhook } from './webhook';
@@ -57,13 +57,18 @@ export default {
     return new Response(log.toString() || 'ok', { status, headers: { 'content-type': 'text/plain' } });
   },
 
-  // Cron entry point. Drains the `recheck:` reminders reviveIfZombie leaves for follow-up commits
-  // that were too fresh to judge when their webhook arrived (e.g. a zombie commit pushed to an
-  // already-handled PR). This is NOT a poll over all PRs: with no reminders it's a single KV list
-  // and no GitHub calls. Schedule in wrangler.toml ([triggers] crons).
+  // Cron entry point ([triggers] crons in wrangler.toml). Two cheap passes:
+  //  1) runRechecks — drains the `recheck:` reminders reviveIfZombie leaves for follow-up commits
+  //     too fresh to judge when their webhook arrived. With no reminders it's a single KV list.
+  //  2) reconcileAllInstalls — the auto-merge backstop: per installation, search for auto_merge-
+  //     labeled PRs and arm/merge any the live webhook path dropped. Cost scales with labeled PRs
+  //     (a search + a couple calls each), not repo count, and is budget-bounded so it stays well
+  //     under the subrequest cap; owners not reached this tick are picked up on the next.
   async scheduled(_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     const log = new Logger();
     await runRechecks(env, log);
+    // Fresh invocation (its own subrequest budget), so a larger allowance than the webhook pass.
+    await reconcileAllInstalls(env, log, { calls: 40 });
   },
 };
 
