@@ -105,6 +105,7 @@ export async function startupReconcile(env: Env, log: Logger): Promise<void> {
           const [owner, name] = fullName.split('/');
           const config = await loadConfig(owner, name, token, log);
           await reconcileAutoMerge(fullName, config, token, log);
+          await maybeOpenPrsForRepo(fullName, config, token, log);
         } catch (e) {
           log.log(`startupReconcile: ${fullName}: ${(e as Error).message}`);
         }
@@ -421,6 +422,7 @@ async function maybeBackfillRepo(fullName: string, installationId: number, env: 
     const [owner, name] = fullName.split('/');
     const config = await loadConfig(owner, name, token, log);
     await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
+    await maybeOpenPrsForRepo(fullName, config, token, log);
     await markBackfilled(env.PR_STATE, fullName);
   } catch (e) {
     log.log(`maybeBackfill: ${fullName}: ${(e as Error).message}`);
