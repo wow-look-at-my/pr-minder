@@ -1,13 +1,24 @@
 import type { Env } from './worker';
-import { loadConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, gh } from './github';
-import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks } from './state';
+import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, gh } from './github';
+import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, markSwept, recentlySwept } from './state';
 import type { Logger } from './logger';
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
 // for the life of the isolate; a cold start just re-checks once, no harm.
 const labelCheckedAt = new Map<string, number>();
 const LABEL_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+
+// GitHub-call budgets for the search-based auto-merge backstop (reconcileInstall). Each unit ~= one
+// external GitHub fetch; the budget keeps a single invocation well under the 50-external-subrequest
+// cap (and leaves headroom for the work the same invocation already did). The webhook pass is the
+// smallest because it shares the event's invocation; the cron has a fresh invocation. Owners/PRs not
+// reached within budget are picked up on the next cron tick or webhook.
+const STARTUP_SWEEP_BUDGET = 30;
+const WEBHOOK_SWEEP_BUDGET = 15;
+// Per-owner cooldown (seconds) between webhook-driven backstop runs, so a burst of webhooks for one
+// owner can't exceed GitHub's ~30/min search rate limit. The cron pass ignores this.
+const BACKSTOP_COOLDOWN_S = 60;
 
 export async function handle(event: string | null, p: any, env: Env, log: Logger): Promise<void> {
   const repo = p.repository?.full_name;
@@ -24,6 +35,32 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
     await maybeBackfillRepo(repo, p.installation.id, env, log);
   }
 
+  await dispatch(event, p, env, log);
+
+  // Auto-merge backstop: after handling the event, opportunistically re-arm any auto_merge-labeled PR
+  // in this owner that the live path may have dropped (the failure mode that left PRs unmerged with no
+  // error). Cooldown-gated per owner so a burst of webhooks can't exceed GitHub's search rate limit;
+  // the cron is the unconditional periodic pass. Self-feeding — a merge here emits its own webhook,
+  // which drains the next. Failures are swallowed: the backstop must never fail the webhook. The
+  // cooldown is claimed before running so concurrent isolates don't pile on.
+  if (repo && p.installation?.id && env.PR_STATE) {
+    const owner = repo.split('/')[0];
+    try {
+      if (!(await recentlySwept(env.PR_STATE, owner))) {
+        await markSwept(env.PR_STATE, owner, BACKSTOP_COOLDOWN_S);
+        const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+        await reconcileInstall(owner, token, log, { calls: WEBHOOK_SWEEP_BUDGET });
+      }
+    } catch (e) {
+      log.log(`backstop ${owner}: ${(e as Error).message}`);
+    }
+  }
+}
+
+// Route an event to its handler. Extracted from handle() so the auto-merge backstop runs after the
+// event-specific work regardless of which branch handled it (or none).
+async function dispatch(event: string | null, p: any, env: Env, log: Logger): Promise<void> {
+  const action = p.action;
   if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'unlabeled', 'synchronize', 'auto_merge_enabled', 'auto_merge_disabled'].includes(action)) {
     return onPR(p, env, log);
   }
@@ -66,19 +103,81 @@ async function maybeEnsureLabelsForRepo(
   }
 }
 
-// One-shot reconcile across every repo the App is installed on. Run once when the Worker starts up
-// (a fresh isolate after a deploy) and again when the App is installed / repos are added. After
-// that we do NOT poll: the live `labeled`/`unlabeled`/`auto_merge_*` webhooks keep state in sync.
-// The startup pass exists only to catch what happened while pr-minder was a previous version (or
-// down) — e.g. a PR that was labeled but never got auto-merge armed because of a bug now fixed.
+// The auto-merge backstop across every installation — the safety net for an auto_merge-labeled PR
+// the live webhook path dropped (e.g. a webhook that hit the subrequest cap). The cron calls this
+// every few minutes and a redeploy calls it once (startupReconcile). With the search-based
+// reconcileInstall it costs ~one search plus a couple calls per *labeled* PR per owner — no per-repo
+// config loads or PR listings — so it never fans out across the whole fleet in a single invocation
+// (that per-repo fan-out was exactly what blew the subrequest cap and silently dropped the work).
+// `budget.calls` bounds it; installs not reached are picked up on the next cron tick.
+export async function reconcileAllInstalls(env: Env, log: Logger, budget: { calls: number }): Promise<void> {
+  let installs: Array<{ id: number; login: string }>;
+  try {
+    installs = await listInstallations(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  } catch (e) {
+    log.log(`reconcileAllInstalls: listInstallations failed: ${(e as Error).message}`);
+    return;
+  }
+  log.log(`reconcileAllInstalls: ${installs.length} installation(s)`);
+  for (const { id, login } of installs) {
+    if (budget.calls <= 0) { log.log(`reconcileAllInstalls: budget spent before ${login}`); break; }
+    try {
+      budget.calls--;
+      const token = await installToken(id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+      await reconcileInstall(login, token, log, budget);
+    } catch (e) {
+      log.log(`reconcileAllInstalls: install ${id} (${login}): ${(e as Error).message}`);
+    }
+  }
+}
+
+// The auto-merge backstop for one installation/owner: re-arm any auto_merge-labeled PR that isn't
+// armed. Loads the owner's org config for the auto_merge label names, then searches the whole
+// installation for each label (one call covers all the owner's repos), and on each hit not already
+// armed calls enableAutoMerge — which direct-merges a PR that's already mergeable, so a "ready" PR
+// the event path dropped gets merged instead of sitting forever. Cost scales with labeled PRs, not
+// repo count. `budget.calls` bounds the GitHub calls; per-PR work is isolated so one failure doesn't
+// abort the pass.
+export async function reconcileInstall(owner: string, token: string, log: Logger, budget: { calls: number }): Promise<void> {
+  budget.calls--; // loadOwnerConfig: the org file, owner-cached after the first read
+  const config = await loadOwnerConfig(owner, token, log);
+  const methodByLabel = new Map<string, string>();
+  for (const [name, opts] of Object.entries(config.labels)) {
+    if (opts.mode === 'auto_merge') methodByLabel.set(name, opts.auto_merge_method);
+  }
+  if (methodByLabel.size === 0) return;
+
+  for (const [label, method] of methodByLabel) {
+    if (budget.calls <= 0) return;
+    budget.calls--;
+    const hits = await searchPrsByLabel(label, token, log);
+    if (hits.length) log.log(`reconcileInstall ${owner}: "${label}" -> ${hits.length} open PR(s)`);
+    for (const { repo, number } of hits) {
+      if (budget.calls <= 1) return; // leave room for the getPull + enable below
+      const tag = `${repo}#${number}`;
+      try {
+        budget.calls--;
+        const pr = await getPull(repo, number, token, log);
+        if (!pr || pr.state !== 'open' || pr.draft || pr.auto_merge) continue; // gone, draft, or already armed
+        budget.calls--;
+        log.log(`${tag}: backstop arm auto-merge (label "${label}")`);
+        await enableAutoMerge(repo, number, pr.node_id, method, token, log);
+      } catch (e) {
+        log.log(`${tag}: backstop failed: ${(e as Error).message}`);
+      }
+    }
+  }
+}
+
+// Re-arm-on-deploy: the version-gated entry point (fired from worker.ts on the first request of a
+// fresh isolate). Keeps the once-per-deploy KV gate from the old cross-repo sweep, but the work is
+// now reconcileAllInstalls (the cheap, search-based backstop) rather than a per-repo fan-out.
 export async function startupReconcile(env: Env, log: Logger): Promise<void> {
-  // Gate on the deploy version so the cross-repo sweep runs once per *deploy*, not once per isolate.
-  // After a deploy many isolates cold-start across the edge and each would otherwise sweep; keying a
-  // KV flag on the Worker version id collapses those to a single trigger. (The module-level guard in
-  // worker.ts already keeps it to once per isolate; this makes it once per version.) Set the flag
-  // before sweeping so a concurrent isolate that loses the race skips instead of duplicating. If
-  // there's no version binding we can't dedup safely (a constant key would block all future
-  // deploys), so we fall back to the per-isolate guard alone.
+  // Gate on the deploy version so the sweep runs once per *deploy*, not once per isolate. After a
+  // deploy many isolates cold-start across the edge and each would otherwise sweep; keying a KV flag
+  // on the Worker version id collapses those to a single trigger. Set the flag before sweeping so a
+  // concurrent isolate that loses the race skips. With no version binding we can't dedup safely (a
+  // constant key would block all future deploys), so we fall back to the per-isolate guard alone.
   const version = env.CF_VERSION_METADATA?.id;
   if (env.PR_STATE && version) {
     const key = `startup:${version}`;
@@ -88,32 +187,7 @@ export async function startupReconcile(env: Env, log: Logger): Promise<void> {
     }
     await env.PR_STATE.put(key, new Date().toISOString());
   }
-
-  let installs: number[];
-  try {
-    installs = await listInstallations(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
-  } catch (e) {
-    log.log(`startupReconcile: listInstallations failed: ${(e as Error).message}`);
-    return;
-  }
-  log.log(`startupReconcile: ${installs.length} installation(s)`);
-  for (const id of installs) {
-    try {
-      const token = await installToken(id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
-      for (const fullName of await listInstallationRepos(token, log)) {
-        try {
-          const [owner, name] = fullName.split('/');
-          const config = await loadConfig(owner, name, token, log);
-          await reconcileAutoMerge(fullName, config, token, log);
-          await maybeOpenPrsForRepo(fullName, config, token, log);
-        } catch (e) {
-          log.log(`startupReconcile: ${fullName}: ${(e as Error).message}`);
-        }
-      }
-    } catch (e) {
-      log.log(`startupReconcile: install ${id}: ${(e as Error).message}`);
-    }
-  }
+  await reconcileAllInstalls(env, log, { calls: STARTUP_SWEEP_BUDGET });
 }
 
 // Reconcile native auto-merge for a repo's open PRs: every PR that carries an `auto_merge`-mode

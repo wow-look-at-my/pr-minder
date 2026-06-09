@@ -268,12 +268,13 @@ export async function fetchApprovers(repo: string, num: number, token: string, l
   return new Set([...latest].filter(([, state]) => state === 'APPROVED').map(([u]) => u));
 }
 
-// Every installation of the App, by id, following pagination. Authenticates as the App itself
-// (JWT, not an installation token) since /app/installations is an App-level endpoint. Returns []
-// on a query error so a startup sweep degrades to a no-op rather than throwing.
-export async function listInstallations(appId: string, privateKey: string, log: Logger): Promise<number[]> {
+// Every installation of the App, by id and owner login, following pagination. Authenticates as the
+// App itself (JWT, not an installation token) since /app/installations is an App-level endpoint. The
+// `login` is the installed account (org or user) — the owner the auto-merge backstop searches and
+// loads org config for. Returns [] on a query error so a sweep degrades to a no-op rather than throw.
+export async function listInstallations(appId: string, privateKey: string, log: Logger): Promise<Array<{ id: number; login: string }>> {
   const jwt = await appJWT(appId, privateKey);
-  const ids: number[] = [];
+  const installs: Array<{ id: number; login: string }> = [];
   let page = 1;
   for (;;) {
     const r = await fetch(`https://api.github.com/app/installations?per_page=100&page=${page}`, {
@@ -281,11 +282,37 @@ export async function listInstallations(appId: string, privateKey: string, log: 
     });
     if (!r.ok) { log.log(`listInstallations: ${r.status}`); break; }
     const data: any[] = await r.json();
-    for (const inst of data) ids.push(inst.id);
+    for (const inst of data) installs.push({ id: inst.id, login: inst.account?.login ?? '' });
     if (data.length < 100) break;
     page++;
   }
-  return ids;
+  return installs;
+}
+
+// Search the installation's repos for open, non-draft PRs carrying `label`, via the Search API
+// (GET /search/issues). An installation token scopes results to the installation's repositories
+// automatically, so no org/user qualifier is needed. This is what lets the auto-merge backstop find
+// every labeled-but-unhandled PR across all of an owner's repos in one call (a handful of results),
+// instead of listing every PR in every repo — so its cost scales with *labeled* PRs, not repo count.
+// Returns [{ repo: "owner/name", number }]. Returns [] on a query error (the caller skips this pass).
+export async function searchPrsByLabel(label: string, token: string, log: Logger): Promise<Array<{ repo: string; number: number }>> {
+  const out: Array<{ repo: string; number: number }> = [];
+  const q = `is:pr is:open draft:false label:"${label}"`;
+  let page = 1;
+  for (;;) {
+    const r = await gh(`/search/issues?q=${encodeURIComponent(q)}&per_page=100&page=${page}`, token, log);
+    if (!r.ok) break;
+    const data: any = await r.json();
+    const items: any[] = data.items ?? [];
+    for (const it of items) {
+      const m = /\/repos\/(.+)$/.exec(it.repository_url ?? '');
+      if (m && typeof it.number === 'number') out.push({ repo: m[1], number: it.number });
+    }
+    if (items.length < 100) break;
+    page++;
+    if (page > 10) break; // GitHub search caps at 1000 results; don't loop past that
+  }
+  return out;
 }
 
 // The installation id covering a single repo, via GET /repos/{repo}/installation (an App-level

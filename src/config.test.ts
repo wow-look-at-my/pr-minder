@@ -326,4 +326,20 @@ describe('loadConfig caching', () => {
     await loadConfig('o', 'r', 'tok', log());
     expect(fetchMock.mock.calls.length).toBe(1); // cached
   });
+
+  it('fetches the shared org file once per owner across different repos (sweep no longer re-fetches it per repo)', async () => {
+    const fetchMock = stubContents([
+      { match: 'o/r1/contents/.github/pr-minder.jsonc', status: 404 },
+      { match: 'o/r2/contents/.github/pr-minder.jsonc', status: 404 },
+      { match: ORG, status: 200, body: contentsBody('{ "auto_trigger_workflows": true }') },
+    ]);
+
+    const a = await loadConfig('o', 'r1', 'tok', log());
+    const b = await loadConfig('o', 'r2', 'tok', log());
+    expect(a.autoTriggerWorkflows).toBe(true);
+    expect(b.autoTriggerWorkflows).toBe(true);
+    // r1: per-repo 404 + org 200. r2: per-repo 404 only — the org file is served from the owner cache.
+    const orgFetches = fetchMock.mock.calls.filter(([u]) => (u as string).includes('/o/.github/contents/'));
+    expect(orgFetches).toHaveLength(1);
+  });
 });
