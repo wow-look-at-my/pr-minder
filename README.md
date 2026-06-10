@@ -212,5 +212,6 @@ Notes:
 
 ```sh
 npm run dev        # wrangler dev (no real webhooks without a tunnel)
+npm test           # vitest
 npm run typecheck  # tsc --noEmit
 ```
