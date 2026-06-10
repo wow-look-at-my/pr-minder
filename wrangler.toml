@@ -40,3 +40,8 @@ binding = "CF_VERSION_METADATA"
 
 [vars]
 GITHUB_APP_ID = "3433933"
+# auto_describe_pr: the OpenAI-compatible endpoint and model that generate PR titles/descriptions
+# from the PR diff. The API key is the AI_API_KEY secret (wrangler secret put AI_API_KEY); without
+# it the feature no-ops. A per-repo config can override the model (auto_describe_pr.model).
+AI_BASE_URL = "https://litellm.pazer.ai/v1"
+AI_MODEL = "auto-pr-desccript"

@@ -336,6 +336,38 @@ export async function getPull(repo: string, num: number, token: string, log: Log
   return r.json();
 }
 
+// The full unified diff of a PR — the whole base...head diff, not one push — via the
+// `application/vnd.github.diff` media type on the PR endpoint. Null on any error, including the
+// documented 406 when the diff is too large for GitHub to render, so callers skip instead of
+// failing the event.
+export async function getPullDiff(repo: string, num: number, token: string, log: Logger): Promise<string | null> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+    headers: { ...ghHeaders(token), accept: 'application/vnd.github.diff' },
+  });
+  if (!r.ok) {
+    log.log(`getPullDiff ${repo}#${num}: ${r.status}`);
+    return null;
+  }
+  return r.text();
+}
+
+// Edit a PR's title and/or body. Editing fires `pull_request.edited`, which pr-minder does not
+// handle, so this can never re-trigger the worker.
+export async function updatePullText(repo: string, num: number, fields: { title?: string; body?: string }, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+    method: 'PATCH',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  if (r.ok) {
+    log.log(`updatePullText ${repo}#${num}: ${Object.keys(fields).join('+')}`);
+    return;
+  }
+  const body = await r.text();
+  log.log(`updatePullText ${repo}#${num}: ${r.status} ${body}`);
+  throw new GhError(r.status, body);
+}
+
 export async function listInstallationRepos(token: string, log: Logger): Promise<string[]> {
   const repos: string[] = [];
   let page = 1;

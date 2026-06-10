@@ -1,9 +1,11 @@
-// Workers KV state for the zombie check. Four kinds of key:
+// Workers KV state for the zombie check. Five kinds of key:
 //   pr:{repo}#{num}        -> the head SHA we last evaluated that PR at
 //   backfill:{repo}        -> set once we've swept a repo's pre-existing PRs
 //   recheck:{repo}#{num}   -> a self-set "re-check this PR later" reminder (see setRecheck)
 //   swept:{owner}          -> a short-lived per-owner cooldown for the auto-merge backstop, so it
 //                             doesn't re-search on every webhook (see markSwept/recentlySwept)
+//   desc:{repo}#{num}      -> SHA-256 of the PR diff the auto_describe_pr metadata was last
+//                             generated from (see describedDiffHash/markDescribed)
 // The per-PR marker is what makes the check "once per commit": a PR is evaluated only when its
 // current head SHA differs from what's stored (new PR, or new commits = a "touched" PR), and the
 // SHA is recorded afterwards. The backfill flag makes the first-webhook sweep of an already-
@@ -66,6 +68,20 @@ export async function listRechecks(kv: KVNamespace): Promise<Array<{ repo: strin
     cursor = res.cursor;
   }
   return out;
+}
+
+// The diff fingerprint auto_describe_pr last generated metadata from, keyed per PR. A
+// synchronize whose effective diff is unchanged (e.g. pr-minder's own update-branch merge) is
+// skipped without a model call; recorded only after the PR edit lands, so a failed attempt
+// retries on the next event. Eventual consistency just means a rare duplicate model call.
+const descKey = (repo: string, num: number) => `desc:${repo}#${num}`;
+
+export async function describedDiffHash(kv: KVNamespace, repo: string, num: number): Promise<string | null> {
+  return kv.get(descKey(repo, num));
+}
+
+export async function markDescribed(kv: KVNamespace, repo: string, num: number, hash: string): Promise<void> {
+  await kv.put(descKey(repo, num), hash);
 }
 
 // Per-owner cooldown for the auto-merge backstop (reconcileInstall). The backstop is cheap (a label

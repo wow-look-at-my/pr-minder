@@ -265,7 +265,7 @@ describe('reconcileAutoMerge', () => {
 
   const label = (name: string) => ({ name });
   const cfg = (labels: PrMinderConfig['labels']): PrMinderConfig =>
-    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], targetBase: '' } });
+    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], targetBase: '' }, autoDescribePr: { enabled: false, model: '' } });
   const autoMergeLabel = { auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode: 'auto_merge' as const, auto_merge_method: 'squash' as const };
 
   afterEach(() => vi.unstubAllGlobals());

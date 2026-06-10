@@ -26,6 +26,7 @@ describe('mergeConfig', () => {
       labels: {},
       autoTriggerWorkflows: false,
       autoOpenPr: { enabled: false, skipBranches: [], targetBase: '' },
+      autoDescribePr: { enabled: false, model: '' },
     });
   });
 
@@ -126,6 +127,35 @@ describe('mergeConfig', () => {
         { auto_open_pr: { skip_branches: ['wip'] } },
       );
       expect(cfg.autoOpenPr).toEqual({ enabled: true, skipBranches: ['wip'], targetBase: 'main' });
+    });
+  });
+
+  describe('auto_describe_pr', () => {
+    it('defaults to disabled with no model override', () => {
+      expect(mergeConfig({}, null).autoDescribePr).toEqual({ enabled: false, model: '' });
+    });
+
+    it('parses enabled and model', () => {
+      const cfg = mergeConfig({ auto_describe_pr: { enabled: true, model: 'alt-model' } }, null);
+      expect(cfg.autoDescribePr).toEqual({ enabled: true, model: 'alt-model' });
+    });
+
+    it('ignores a non-boolean enabled and a non-string model', () => {
+      const cfg = mergeConfig({ auto_describe_pr: { enabled: 'yes', model: 42 } }, null);
+      expect(cfg.autoDescribePr).toEqual({ enabled: false, model: '' });
+    });
+
+    it('a per-repo override can enable it and can opt back out', () => {
+      expect(mergeConfig({}, { auto_describe_pr: { enabled: true } }).autoDescribePr.enabled).toBe(true);
+      expect(mergeConfig({ auto_describe_pr: { enabled: true } }, { auto_describe_pr: { enabled: false } }).autoDescribePr.enabled).toBe(false);
+    });
+
+    it('a per-repo override merges field-by-field over the top-level', () => {
+      const cfg = mergeConfig(
+        { auto_describe_pr: { enabled: true } },
+        { auto_describe_pr: { model: 'special' } },
+      );
+      expect(cfg.autoDescribePr).toEqual({ enabled: true, model: 'special' });
     });
   });
 
