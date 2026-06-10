@@ -53,9 +53,9 @@ wrangler secret put AI_API_KEY               # only needed for auto_describe_pr
 
 # Update wrangler.toml with your real app ID
 # Edit GITHUB_APP_ID under [vars]
-
-npm run deploy
 ```
+
+Deploys are automatic via Cloudflare's Git integration: every PR branch gets a preview Worker, and merging to `master` deploys production. Don't run `wrangler deploy` by hand.
 
 ## Configuration
 
