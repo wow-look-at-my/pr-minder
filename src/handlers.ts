@@ -2,7 +2,12 @@ import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
 import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, gh } from './github';
 import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, markSwept, recentlySwept } from './state';
+import { maybeDescribePr, shouldDescribe } from './describe';
 import type { Logger } from './logger';
+
+// Runs side work (the auto_describe_pr model call) outside the webhook's response path —
+// worker.ts passes ctx.waitUntil. When absent (tests), the work is awaited inline.
+export type Defer = (work: Promise<unknown>) => void;
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
 // for the life of the isolate; a cold start just re-checks once, no harm.
@@ -20,7 +25,7 @@ const WEBHOOK_SWEEP_BUDGET = 15;
 // owner can't exceed GitHub's ~30/min search rate limit. The cron pass ignores this.
 const BACKSTOP_COOLDOWN_S = 60;
 
-export async function handle(event: string | null, p: any, env: Env, log: Logger): Promise<void> {
+export async function handle(event: string | null, p: any, env: Env, log: Logger, defer?: Defer): Promise<void> {
   const repo = p.repository?.full_name;
   const action = p.action;
   const prNum = p.pull_request?.number;
@@ -35,7 +40,7 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
     await maybeBackfillRepo(repo, p.installation.id, env, log);
   }
 
-  await dispatch(event, p, env, log);
+  await dispatch(event, p, env, log, defer);
 
   // Auto-merge backstop: after handling the event, opportunistically re-arm any auto_merge-labeled PR
   // in this owner that the live path may have dropped (the failure mode that left PRs unmerged with no
@@ -59,14 +64,14 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
 
 // Route an event to its handler. Extracted from handle() so the auto-merge backstop runs after the
 // event-specific work regardless of which branch handled it (or none).
-async function dispatch(event: string | null, p: any, env: Env, log: Logger): Promise<void> {
+async function dispatch(event: string | null, p: any, env: Env, log: Logger, defer?: Defer): Promise<void> {
   const action = p.action;
   if (event === 'pull_request' && ['opened', 'reopened', 'ready_for_review', 'labeled', 'unlabeled', 'synchronize', 'auto_merge_enabled', 'auto_merge_disabled'].includes(action)) {
-    return onPR(p, env, log);
+    return onPR(p, env, log, defer);
   }
   // Webhook payload uses lowercase state; REST API uses uppercase — different conventions.
   if (event === 'pull_request_review' && action === 'submitted' && p.review?.state === 'approved') {
-    return onPR(p, env, log);
+    return onPR(p, env, log, defer);
   }
   if (event === 'push' && typeof p.ref === 'string' && p.ref.startsWith('refs/heads/') && !p.deleted) {
     if (p.ref === `refs/heads/${p.repository.default_branch}`) {
@@ -217,7 +222,7 @@ export async function reconcileAutoMerge(repo: string, config: PrMinderConfig, t
   }
 }
 
-async function onPR(p: any, env: Env, log: Logger): Promise<void> {
+async function onPR(p: any, env: Env, log: Logger, defer?: Defer): Promise<void> {
   const pr = p.pull_request;
   const repo = p.repository.full_name;
   const tag = `${repo}#${pr.number}`;
@@ -232,6 +237,18 @@ async function onPR(p: any, env: Env, log: Logger): Promise<void> {
   const [owner, name] = repo.split('/');
   const config = await loadConfig(owner, name, token, log);
   log.log(`${tag}: labels=${Object.keys(config.labels).length}`);
+
+  // AI title/description from the PR's full diff. Deferred via waitUntil when available — the
+  // model call dwarfs GitHub's 10s webhook window, so the webhook acks first and the PR edit
+  // lands in the background. Scheduled before the zombie-revive early return below so a PR we
+  // close+reopen is still described from this event (our reopen comes back as `reopened`, which
+  // shouldDescribe excludes). Failures are logged and swallowed — describing must never fail the
+  // webhook; the next push retries.
+  if (config.autoDescribePr.enabled && shouldDescribe(action)) {
+    const work = maybeDescribePr(env, repo, pr, config, token, log)
+      .catch((e) => log.log(`${tag}: describe failed: ${(e as Error).message}`));
+    if (defer) defer(work); else await work;
+  }
 
   if (action === 'opened') {
     await applyAutoAddLabels(repo, pr, config, token, log);

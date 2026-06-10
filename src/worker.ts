@@ -18,6 +18,11 @@ export interface Env {
   // keys the once-per-deploy gate on the startup auto-merge reconcile. Optional so dev/tests without
   // the binding still typecheck (the gate then degrades to the per-isolate guard).
   CF_VERSION_METADATA?: { id: string; tag: string; timestamp: string };
+  // auto_describe_pr: OpenAI-compatible endpoint + model (wrangler.toml [vars]; src/describe.ts
+  // holds the fallbacks) and its API key (a secret). Without the key the feature no-ops.
+  AI_BASE_URL?: string;
+  AI_MODEL?: string;
+  AI_API_KEY?: string;
 }
 
 // Reconcile-on-startup, not poll. Each fresh isolate (e.g. after a deploy) runs the cross-repo
@@ -49,7 +54,10 @@ export default {
     const log = new Logger();
     let status = 200;
     try {
-      await handle(event, payload, env, log);
+      // The defer callback lets slow side work (the auto_describe_pr model call) run via
+      // waitUntil, after this response: GitHub marks a delivery failed at 10s, so the webhook
+      // acks fast and the deferred work gets the post-response grace window instead.
+      await handle(event, payload, env, log, (work) => ctx.waitUntil(work));
     } catch (e) {
       log.log(`error: ${(e as Error).stack ?? (e as Error).message}`);
       status = e instanceof GhError ? e.status : 500;
