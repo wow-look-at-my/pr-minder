@@ -133,9 +133,11 @@ describe('maybeDescribePr', () => {
     const chatBody = JSON.parse((chatCall[1] as any).body);
     expect(chatBody.temperature).toBe(0);
     expect(chatBody.model).toBe('test-model');
+    // system prompt, then two bare user messages: the old metadata JSON, then the diff.
+    expect(chatBody.messages.map((m: any) => m.role)).toEqual(['system', 'user', 'user']);
     expect(chatBody.messages[1].content).toContain('claude/foo-123'); // old title rides along
     expect(chatBody.messages[1].content).toContain('old human notes'); // old description rides along
-    expect(chatBody.messages[1].content).toContain(DIFF.trim());
+    expect(chatBody.messages[2].content).toBe(DIFF); // the diff message is the diff, nothing else
 
     const patch = fetchMock.mock.calls.find(([, i]) => (i as any)?.method === 'PATCH')!;
     const patched = JSON.parse((patch[1] as any).body);

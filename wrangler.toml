@@ -44,4 +44,4 @@ GITHUB_APP_ID = "3433933"
 # from the PR diff. The API key is the AI_API_KEY secret (wrangler secret put AI_API_KEY); without
 # it the feature no-ops. A per-repo config can override the model (auto_describe_pr.model).
 AI_BASE_URL = "https://litellm.pazer.ai/v1"
-AI_MODEL = "auto-pr-desccript"
+AI_MODEL = "auto-pr-descript"
