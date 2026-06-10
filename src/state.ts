@@ -1,4 +1,4 @@
-// Workers KV state for the zombie check. Five kinds of key:
+// Workers KV state for the zombie check. Six kinds of key:
 //   pr:{repo}#{num}        -> the head SHA we last evaluated that PR at
 //   backfill:{repo}        -> set once we've swept a repo's pre-existing PRs
 //   recheck:{repo}#{num}   -> a self-set "re-check this PR later" reminder (see setRecheck)
@@ -6,6 +6,9 @@
 //                             doesn't re-search on every webhook (see markSwept/recentlySwept)
 //   desc:{repo}#{num}      -> SHA-256 of the PR diff the auto_describe_pr metadata was last
 //                             generated from (see describedDiffHash/markDescribed)
+//   descrun:{repo}#{num}   -> the webhook-runner run id of the last describe hand-off, so a
+//                             newer diff can cancel a superseded in-flight run (see
+//                             describeRunId/markDescribeRun)
 // The per-PR marker is what makes the check "once per commit": a PR is evaluated only when its
 // current head SHA differs from what's stored (new PR, or new commits = a "touched" PR), and the
 // SHA is recorded afterwards. The backfill flag makes the first-webhook sweep of an already-
@@ -82,6 +85,22 @@ export async function describedDiffHash(kv: KVNamespace, repo: string, num: numb
 
 export async function markDescribed(kv: KVNamespace, repo: string, num: number, hash: string): Promise<void> {
   await kv.put(descKey(repo, num), hash);
+}
+
+// The webhook-runner run id of the last describe hand-off, keyed per PR. When a newer diff
+// arrives, the previous run may still be mid-model-call with now-stale input; reading this id
+// lets the new hand-off cancel it first (POST {hook}/cancel/{run}), so the runs can't finish
+// out of order. Best-effort: runs end on their own, so the TTL just stops dead ids from
+// accumulating — cancelling an already-finished run is a harmless 409.
+const descRunKey = (repo: string, num: number) => `descrun:${repo}#${num}`;
+const DESC_RUN_TTL_S = 86400;
+
+export async function describeRunId(kv: KVNamespace, repo: string, num: number): Promise<string | null> {
+  return kv.get(descRunKey(repo, num));
+}
+
+export async function markDescribeRun(kv: KVNamespace, repo: string, num: number, runId: string): Promise<void> {
+  await kv.put(descRunKey(repo, num), runId, { expirationTtl: DESC_RUN_TTL_S });
 }
 
 // Per-owner cooldown for the auto-merge backstop (reconcileInstall). The backstop is cheap (a label

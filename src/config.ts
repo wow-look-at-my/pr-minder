@@ -41,12 +41,13 @@ export interface AutoOpenPr {
   targetBase: string; // base branch for opened PRs; '' means the repo's default branch
 }
 
-// AI-generated PR titles/descriptions from the full PR diff (src/describe.ts). The endpoint and
-// API key are Worker-level (AI_BASE_URL/AI_MODEL vars + AI_API_KEY secret); config only opts a
-// repo in and optionally picks a different model alias.
+// AI-generated PR titles/descriptions from the full PR diff (src/describe.ts). The slow model
+// call runs in the pr-describe webhook on the internal webhook-runner host (Worker-level
+// DESCRIBE_HOOK_URL var + DESCRIBE_HOOK_API_KEY secret); the model endpoint/key live with that
+// webhook. Config only opts a repo in and optionally picks a different model alias.
 export interface AutoDescribePr {
   enabled: boolean;
-  model: string; // '' means the Worker-level default (AI_MODEL var)
+  model: string; // '' means the webhook's default model (its AI_MODEL env)
 }
 
 const PER_REPO_CONFIG = '.github/pr-minder.jsonc';

@@ -351,23 +351,6 @@ export async function getPullDiff(repo: string, num: number, token: string, log:
   return r.text();
 }
 
-// Edit a PR's title and/or body. Editing fires `pull_request.edited`, which pr-minder does not
-// handle, so this can never re-trigger the worker.
-export async function updatePullText(repo: string, num: number, fields: { title?: string; body?: string }, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
-    method: 'PATCH',
-    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
-    body: JSON.stringify(fields),
-  });
-  if (r.ok) {
-    log.log(`updatePullText ${repo}#${num}: ${Object.keys(fields).join('+')}`);
-    return;
-  }
-  const body = await r.text();
-  log.log(`updatePullText ${repo}#${num}: ${r.status} ${body}`);
-  throw new GhError(r.status, body);
-}
-
 export async function listInstallationRepos(token: string, log: Logger): Promise<string[]> {
   const repos: string[] = [];
   let page = 1;

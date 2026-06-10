@@ -5,8 +5,9 @@ import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, cle
 import { maybeDescribePr, shouldDescribe } from './describe';
 import type { Logger } from './logger';
 
-// Runs side work (the auto_describe_pr model call) outside the webhook's response path —
-// worker.ts passes ctx.waitUntil. When absent (tests), the work is awaited inline.
+// Runs side work (the auto_describe_pr hand-off to the pr-describe webhook) outside the
+// webhook's response path — worker.ts passes ctx.waitUntil. When absent (tests), the work is
+// awaited inline.
 export type Defer = (work: Promise<unknown>) => void;
 
 // Per-repo throttle for opportunistic label checks. Module-scope cache lives
@@ -238,12 +239,14 @@ async function onPR(p: any, env: Env, log: Logger, defer?: Defer): Promise<void>
   const config = await loadConfig(owner, name, token, log);
   log.log(`${tag}: labels=${Object.keys(config.labels).length}`);
 
-  // AI title/description from the PR's full diff. Deferred via waitUntil when available — the
-  // model call dwarfs GitHub's 10s webhook window, so the webhook acks first and the PR edit
-  // lands in the background. Scheduled before the zombie-revive early return below so a PR we
-  // close+reopen is still described from this event (our reopen comes back as `reopened`, which
-  // shouldDescribe excludes). Failures are logged and swallowed — describing must never fail the
-  // webhook; the next push retries.
+  // AI title/description from the PR's full diff — handed off to the pr-describe webhook
+  // (webhook-runner), which makes the slow model call outside the Worker's time limits and
+  // PATCHes the PR itself. Still deferred via waitUntil when available: the hand-off is a few
+  // fast subrequests (diff fetch, cancel, hook POST) that needn't delay the webhook ack.
+  // Scheduled before the zombie-revive early return below so a PR we close+reopen is still
+  // described from this event (our reopen comes back as `reopened`, which shouldDescribe
+  // excludes). Failures are logged and swallowed — describing must never fail the webhook; the
+  // next push retries.
   if (config.autoDescribePr.enabled && shouldDescribe(action)) {
     const work = maybeDescribePr(env, repo, pr, config, token, log)
       .catch((e) => log.log(`${tag}: describe failed: ${(e as Error).message}`));

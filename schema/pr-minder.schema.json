@@ -96,7 +96,7 @@
           "default": false
         },
         "model": {
-          "description": "Override the Worker's default model name for this repo/org.",
+          "description": "Override the default model name for this repo/org (the default is configured on the pr-describe webhook).",
           "type": "string"
         }
       }
