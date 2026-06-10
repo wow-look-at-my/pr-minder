@@ -13,7 +13,7 @@ import { describedDiffHash, markDescribed } from './state';
 // these are the fallback so dev and tests work without them. The API key is always the
 // AI_API_KEY secret — without it the feature logs a skip and does nothing.
 export const DEFAULT_AI_BASE_URL = 'https://litellm.pazer.ai/v1';
-export const DEFAULT_AI_MODEL = 'auto-pr-desccript';
+export const DEFAULT_AI_MODEL = 'auto-pr-descript';
 
 // A diff larger than this is truncated before being sent to the model — enough for any PR a
 // description meaningfully summarizes, and a guard against blowing the model's context window.
