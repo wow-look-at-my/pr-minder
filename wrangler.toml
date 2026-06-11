@@ -42,10 +42,13 @@ binding = "CF_VERSION_METADATA"
 GITHUB_APP_ID = "3433933"
 # auto_describe_pr: the pr-describe webhook (wow-look-at-my/webhooks, run by webhook-runner)
 # does the slow LLM call and PATCHes the PR — the model call outlives the Worker's ~30s
-# post-response grace, so it can't run here. Set DESCRIBE_HOOK_URL to the full hook URL on the
-# runner's public (tunnel) hostname, and the DESCRIBE_HOOK_API_KEY secret (wrangler secret put)
-# to the hook's api_key (committed in plaintext in the webhooks repo's pr-describe/hook.json).
-# Without the URL the feature
-# no-ops. The model endpoint/key now live with the webhook, not this Worker; a per-repo config
-# can still override the model (auto_describe_pr.model).
-# DESCRIBE_HOOK_URL = "https://hooks.example.com/hook/pr-describe"
+# post-response grace, so it can't run here. DESCRIBE_HOOK_URL is the full hook URL on the
+# runner's public (tunnel) hostname; the DESCRIBE_HOOK_API_KEY secret (wrangler secret put)
+# must equal the hook's api_key (committed in plaintext in the webhooks repo's
+# pr-describe/hook.json). The URL lives HERE and not as a dashboard var on purpose: each
+# deploy replaces the script's plain vars with this [vars] block, so a dashboard-only var
+# silently evaporates on the next merge to master. If auto_describe_pr is enabled in config
+# while this var is missing, pr-minder reports the misconfiguration as a comment on the PR —
+# never a silent skip. The model endpoint/key live with the webhook, not this Worker; a
+# per-repo config can still override the model (auto_describe_pr.model).
+DESCRIBE_HOOK_URL = "https://hooks.pazer.io/hook/pr-describe"

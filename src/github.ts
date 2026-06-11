@@ -221,6 +221,19 @@ export async function createPull(repo: string, head: string, base: string, title
   return null;
 }
 
+// Post a comment on an issue/PR (the App has issues:write; it has NO statuses permission,
+// so comments are pr-minder's way to surface its own failures where a human actually looks —
+// on the PR — instead of only in Worker logs). Throws on failure so callers can fall back.
+export async function postIssueComment(repo: string, num: number, body: string, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/comments`, {
+    method: 'POST',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ body }),
+  });
+  if (!r.ok) throw new GhError(r.status, await r.text());
+  log.log(`postIssueComment ${repo}#${num}: posted`);
+}
+
 export async function addLabelsToPr(repo: string, num: number, labels: string[], token: string, log: Logger): Promise<void> {
   if (labels.length === 0) return;
   const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/labels`, {
