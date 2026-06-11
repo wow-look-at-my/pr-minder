@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { maybeDescribePr, shouldDescribe } from './describe';
+import { maybeDescribePr, describeAndReport, shouldDescribe } from './describe';
 import { Logger } from './logger';
 import type { PrMinderConfig } from './config';
 
@@ -129,10 +129,11 @@ describe('maybeDescribePr', () => {
     expect(store.get('desc:o/r#7')).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('does nothing (no fetches) without DESCRIBE_HOOK_URL', async () => {
+  it('throws on missing DESCRIBE_HOOK_URL — enabled-but-unconfigured is a misconfiguration, not an opt-out', async () => {
     const { kv } = fakeKV();
     const fetchMock = routeFetch([]);
-    await maybeDescribePr(makeEnv(kv, { DESCRIBE_HOOK_URL: undefined }), 'o/r', pr, cfg(), 'tok', new Logger());
+    await expect(maybeDescribePr(makeEnv(kv, { DESCRIBE_HOOK_URL: undefined }), 'o/r', pr, cfg(), 'tok', new Logger()))
+      .rejects.toThrow(/DESCRIBE_HOOK_URL/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -166,5 +167,101 @@ describe('maybeDescribePr', () => {
     await expect(maybeDescribePr(makeEnv(kv), 'o/r', pr, cfg(), 'tok', new Logger())).rejects.toThrow(/401/);
     expect(store.has('desc:o/r#7')).toBe(false); // next event retries
     expect(store.has('descrun:o/r#7')).toBe(false);
+  });
+});
+
+describe('describeAndReport', () => {
+  // Same routing/KV doubles as the maybeDescribePr block above.
+  function routeFetch(routes: Array<{ match: string; method?: string; status?: number; body?: unknown; throws?: boolean }>) {
+    const fn = vi.fn(async (url: string, init?: any) => {
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const route = routes.find((r) => url.includes(r.match) && (r.method ?? 'GET') === method);
+      if (!route) throw new Error(`unexpected fetch ${method} ${url}`);
+      if (route.throws) throw new TypeError('fetch failed');
+      const status = route.status ?? 200;
+      const text = typeof route.body === 'string' ? route.body : JSON.stringify(route.body ?? {});
+      return { ok: status >= 200 && status < 300, status, text: async () => text, json: async () => JSON.parse(text) };
+    });
+    vi.stubGlobal('fetch', fn);
+    return fn;
+  }
+
+  function fakeKV(initial: Record<string, string> = {}) {
+    const store = new Map<string, string>(Object.entries(initial));
+    return {
+      store,
+      kv: {
+        get: async (k: string) => store.get(k) ?? null,
+        put: async (k: string, v: string) => { store.set(k, v); },
+        delete: async (k: string) => { store.delete(k); },
+      },
+    };
+  }
+
+  const HOOK = 'https://hooks.example/hook/pr-describe';
+  const makeEnv = (kv: any, over: Record<string, unknown> = {}): any =>
+    ({ PR_STATE: kv, DESCRIBE_HOOK_URL: HOOK, DESCRIBE_HOOK_API_KEY: 'hook-key', ...over });
+  const cfg = (): PrMinderConfig =>
+    ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], targetBase: '' }, autoDescribePr: { enabled: true, model: '' } });
+  const pr = { number: 7, title: 't', body: 'b' };
+  const DIFF = 'diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n';
+  const COMMENTS = '/repos/o/r/issues/7/comments';
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('posts the misconfiguration as a PR comment and records the dedup marker', async () => {
+    const { kv, store } = fakeKV();
+    const fetchMock = routeFetch([{ match: COMMENTS, method: 'POST', status: 201, body: {} }]);
+    await describeAndReport(makeEnv(kv, { DESCRIBE_HOOK_URL: undefined }), 'o/r', pr, cfg(), 'tok', new Logger());
+
+    const post = fetchMock.mock.calls.find(([u]) => (u as string).includes(COMMENTS))!;
+    const body = JSON.parse((post[1] as any).body).body as string;
+    expect(body).toContain('DESCRIBE_HOOK_URL');
+    expect(body).toContain('pr-minder:describe-error');
+    expect(store.get('descerr:o/r#7')).toMatch(/DESCRIBE_HOOK_URL/);
+  });
+
+  it('suppresses a repeat of the same error but reports a different one', async () => {
+    const { kv } = fakeKV();
+    const env = makeEnv(kv, { DESCRIBE_HOOK_URL: undefined });
+    const first = routeFetch([{ match: COMMENTS, method: 'POST', status: 201, body: {} }]);
+    await describeAndReport(env, 'o/r', pr, cfg(), 'tok', new Logger());
+    expect(first.mock.calls.filter(([u]) => (u as string).includes(COMMENTS))).toHaveLength(1);
+
+    // Same misconfiguration again: no comment POST is routable — a post would throw inside
+    // the reporter and be swallowed, so assert directly that no comment was attempted.
+    const second = routeFetch([]);
+    await describeAndReport(env, 'o/r', pr, cfg(), 'tok', new Logger());
+    expect(second).not.toHaveBeenCalled();
+
+    // A different failure (hook 401) posts a fresh comment.
+    const third = routeFetch([
+      { match: '/pulls/7', body: DIFF },
+      { match: '/hook/pr-describe', method: 'POST', status: 401, body: { error: 'invalid api key' } },
+      { match: COMMENTS, method: 'POST', status: 201, body: {} },
+    ]);
+    await describeAndReport(makeEnv(kv), 'o/r', pr, cfg(), 'tok', new Logger());
+    const post = third.mock.calls.find(([u]) => (u as string).includes(COMMENTS))!;
+    expect(JSON.parse((post[1] as any).body).body).toContain('401');
+  });
+
+  it('clears the dedup marker on a successful hand-off so a recurrence is loud again', async () => {
+    const { kv, store } = fakeKV({ 'descerr:o/r#7': 'stale error' });
+    routeFetch([
+      { match: '/pulls/7', body: DIFF },
+      { match: '/hook/pr-describe', method: 'POST', status: 202, body: { run_id: 'r1' } },
+    ]);
+    await describeAndReport(makeEnv(kv), 'o/r', pr, cfg(), 'tok', new Logger());
+    expect(store.has('descerr:o/r#7')).toBe(false);
+    expect(store.get('descrun:o/r#7')).toBe('r1');
+  });
+
+  it('never rejects, even when posting the comment itself fails', async () => {
+    const { kv, store } = fakeKV();
+    routeFetch([{ match: COMMENTS, method: 'POST', throws: true }]);
+    await expect(
+      describeAndReport(makeEnv(kv, { DESCRIBE_HOOK_URL: undefined }), 'o/r', pr, cfg(), 'tok', new Logger()),
+    ).resolves.toBeUndefined();
+    expect(store.has('descerr:o/r#7')).toBe(false); // not marked — the next event retries the report
   });
 });
