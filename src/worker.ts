@@ -18,11 +18,13 @@ export interface Env {
   // keys the once-per-deploy gate on the startup auto-merge reconcile. Optional so dev/tests without
   // the binding still typecheck (the gate then degrades to the per-isolate guard).
   CF_VERSION_METADATA?: { id: string; tag: string; timestamp: string };
-  // auto_describe_pr: OpenAI-compatible endpoint + model (wrangler.toml [vars]; src/describe.ts
-  // holds the fallbacks) and its API key (a secret). Without the key the feature no-ops.
-  AI_BASE_URL?: string;
-  AI_MODEL?: string;
-  AI_API_KEY?: string;
+  // auto_describe_pr: the pr-describe webhook on the internal webhook-runner host, which does
+  // the slow LLM call and PATCHes the PR (the model call outlives the Worker's ~30s
+  // post-response grace, so it can't run here). DESCRIBE_HOOK_URL is the full hook URL
+  // (e.g. https://hooks.example.com/hook/pr-describe; wrangler.toml [vars]) and
+  // DESCRIBE_HOOK_API_KEY (a secret) its api_key. Without the URL the feature no-ops.
+  DESCRIBE_HOOK_URL?: string;
+  DESCRIBE_HOOK_API_KEY?: string;
 }
 
 // Reconcile-on-startup, not poll. Each fresh isolate (e.g. after a deploy) runs the cross-repo

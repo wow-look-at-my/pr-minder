@@ -49,7 +49,7 @@ npm install
 # Set secrets
 wrangler secret put WEBHOOK_SECRET
 wrangler secret put GITHUB_APP_PRIVATE_KEY   # paste the full PKCS8 PEM
-wrangler secret put AI_API_KEY               # only needed for auto_describe_pr
+wrangler secret put DESCRIBE_HOOK_API_KEY   # only needed for auto_describe_pr (the pr-describe webhook's api_key)
 
 # Update wrangler.toml with your real app ID
 # Edit GITHUB_APP_ID under [vars]
@@ -193,18 +193,19 @@ This replaces the "open PRs for branches missing one" job people often run as a 
   "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
   "auto_describe_pr": {
     "enabled": true,
-    // Optional: override the worker's default model name for this repo/org.
+    // Optional: override the default model name for this repo/org.
     "model": ""
   }
 }
 ```
 
-The model endpoint lives on the worker, not in repo config: `AI_BASE_URL` and `AI_MODEL` in `wrangler.toml` `[vars]` pick the OpenAI-compatible endpoint and model, and the `AI_API_KEY` secret authenticates — without that secret the feature does nothing.
+The heavy lifting happens off-worker: real LLM calls outlive a Worker's time limits, so the worker hands the diff to the **pr-describe webhook** (the [webhooks](https://github.com/wow-look-at-my/webhooks) repo, served by [webhook-runner](https://github.com/wow-look-at-my/webhook-runner)) fire-and-forget, and the webhook calls the model and edits the PR. Configure `DESCRIBE_HOOK_URL` in `wrangler.toml` `[vars]` (the full `POST /hook/pr-describe` URL) and the `DESCRIBE_HOOK_API_KEY` secret (the hook's api_key) — without the URL the feature does nothing. The model endpoint and its key are configured on the webhook side.
 
 Notes:
 - **Opt-in**, off by default. Draft PRs are skipped until they're marked ready for review.
-- The work is deduped on a hash of the diff (Workers KV): a new commit that doesn't change the PR's effective diff — most notably pr-minder's own "update branch" merges — costs no model call. The hash is only recorded after a successful edit, so failures retry on the PR's next event.
-- The model call runs after the webhook has been acknowledged, so deliveries stay fast; a failed or unparseable model response is logged and the PR is left untouched.
+- The work is deduped on a hash of the diff (Workers KV): a new commit that doesn't change the PR's effective diff — most notably pr-minder's own "update branch" merges — costs no model call. The hash is only recorded once the run has been accepted by the webhook host (which retries transient model failures itself), so a failed hand-off retries on the PR's next event.
+- The hand-off runs after the GitHub webhook has been acknowledged, so deliveries stay fast; a failed or unparseable model response is logged on the webhook side and the PR is left untouched.
+- If new commits arrive while a describe run is still in flight, the stale run is cancelled before the new one is submitted, so an outdated description can never overwrite a fresh one.
 - It cannot loop: editing the title/body fires `pull_request.edited`, which the worker doesn't handle.
 - Very large diffs are truncated before being sent to the model; a diff GitHub refuses to render (HTTP 406) skips that PR.
 
