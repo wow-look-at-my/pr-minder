@@ -44,8 +44,8 @@ GITHUB_APP_ID = "3433933"
 # does the slow LLM call and PATCHes the PR — the model call outlives the Worker's ~30s
 # post-response grace, so it can't run here. Set DESCRIBE_HOOK_URL to the full hook URL on the
 # runner's public (tunnel) hostname, and the DESCRIBE_HOOK_API_KEY secret (wrangler secret put)
-# to the hook's api_key (= PR_DESCRIBE_API_KEY in the webhooks repo's encrypted secrets file or
-# the runner host's env). Without the URL the feature
+# to the hook's api_key (committed in plaintext in the webhooks repo's pr-describe/hook.json).
+# Without the URL the feature
 # no-ops. The model endpoint/key now live with the webhook, not this Worker; a per-repo config
 # can still override the model (auto_describe_pr.model).
 # DESCRIBE_HOOK_URL = "https://hooks.example.com/hook/pr-describe"
