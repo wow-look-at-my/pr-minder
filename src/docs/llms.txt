@@ -20,8 +20,8 @@ Config files are JSONC — `//` line comments and `/* */` block comments are all
 
 pr-minder resolves config in this order (first match wins):
 
-1. `<repo>/.github/pr-minder.jsonc` — per-repo config (highest priority).
-2. `<org>/.github` repo, at `.github/config/pr-minder/pr-minder.jsonc` — org-wide defaults. Per-repo overrides go under `repos.<repo-name>`; top-level keys are the org default.
+1. `<repo>/.github/config/pr-minder/pr-minder.jsonc` — per-repo config (highest priority).
+2. `<org>/.github` repo, at `.github/config/pr-minder/pr-minder.jsonc` (the same path) — org-wide defaults. Per-repo overrides go under `repos.<repo-name>`; top-level keys are the org default.
 3. No config found — everything is disabled.
 
 Config is cached for up to 60 seconds, so an edit can take about a minute to take effect.

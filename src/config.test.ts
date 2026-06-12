@@ -275,7 +275,7 @@ describe('loadConfig caching', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   const log = () => new Logger();
-  const PER_REPO = 'o/r/contents/.github/pr-minder.jsonc';
+  const PER_REPO = 'o/r/contents/.github/config/pr-minder/pr-minder.jsonc';
   const ORG = 'o/.github/contents/.github/config/pr-minder/pr-minder.jsonc';
 
   it('resolves once and serves the cache on subsequent calls within the TTL', async () => {
@@ -359,8 +359,8 @@ describe('loadConfig caching', () => {
 
   it('fetches the shared org file once per owner across different repos (sweep no longer re-fetches it per repo)', async () => {
     const fetchMock = stubContents([
-      { match: 'o/r1/contents/.github/pr-minder.jsonc', status: 404 },
-      { match: 'o/r2/contents/.github/pr-minder.jsonc', status: 404 },
+      { match: 'o/r1/contents/.github/config/pr-minder/pr-minder.jsonc', status: 404 },
+      { match: 'o/r2/contents/.github/config/pr-minder/pr-minder.jsonc', status: 404 },
       { match: ORG, status: 200, body: contentsBody('{ "auto_trigger_workflows": true }') },
     ]);
 

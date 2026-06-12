@@ -59,7 +59,7 @@ Deploys are automatic via Cloudflare's Git integration: every PR branch gets a p
 
 ## Configuration
 
-Per-repo config at `.github/pr-minder.jsonc` overrides the org-level config at `.github/config/pr-minder/pr-minder.jsonc` in the org's `.github` repo. **If no config file is found, all behavior is disabled** — pr-minder is opt-in.
+Per-repo config at `.github/config/pr-minder/pr-minder.jsonc` overrides the org-level config at the same path (`.github/config/pr-minder/pr-minder.jsonc`) in the org's `.github` repo. **If no config file is found, all behavior is disabled** — pr-minder is opt-in.
 
 Config files are **JSONC** — `//` and `/* */` comments are supported.
 
@@ -71,7 +71,7 @@ Top-level sections:
 - `auto_open_pr` — object. Open PRs for forgotten branches, born with CI already running (see [Auto-opening PRs for forgotten branches](#auto-opening-prs-for-forgotten-branches)). Defaults to disabled.
 - `auto_describe_pr` — object. Generate the PR title/description from the PR's full diff with an AI model (see [AI-generated titles and descriptions](#ai-generated-titles-and-descriptions)). Defaults to disabled.
 
-**Per-repo** (`.github/pr-minder.jsonc`):
+**Per-repo** (`.github/config/pr-minder/pr-minder.jsonc`):
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",

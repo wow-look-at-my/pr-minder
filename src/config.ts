@@ -50,7 +50,11 @@ export interface AutoDescribePr {
   model: string; // '' means the webhook's default model (its AI_MODEL env)
 }
 
-const PER_REPO_CONFIG = '.github/pr-minder.jsonc';
+// Per-repo and org configs live at the same path; they differ only by repo. The per-repo file is
+// {owner}/{repo}/.github/config/pr-minder/pr-minder.jsonc; the org default is the same path in the
+// owner's `.github` repo. (For the `.github` repo itself the two coincide — the per-repo read finds
+// the org file and uses it directly, which is harmless.)
+const PER_REPO_CONFIG = '.github/config/pr-minder/pr-minder.jsonc';
 const ORG_CONFIG = '.github/config/pr-minder/pr-minder.jsonc';
 
 export const DEFAULT_LABEL_COLOR = '00FF00';

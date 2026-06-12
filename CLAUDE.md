@@ -18,7 +18,7 @@ src/
 scripts/
   build-docs.mjs          Build step: gzip the doc sources -> src/docs/*.gz (run via wrangler.toml [build].command)
 schema/
-  pr-minder.schema.json   JSON Schema for .github/pr-minder.jsonc config files
+  pr-minder.schema.json   JSON Schema for .github/config/pr-minder/pr-minder.jsonc config files
 wrangler.toml             Worker name, compat date, [build] gzip step, [[rules]] Data for *.gz, [[kv_namespaces]] PR_STATE, [version_metadata] CF_VERSION_METADATA (deploy id for the once-per-deploy startup gate), [triggers] crons (the every-5-min sweep: recheck reminders + auto-merge backstop), plain vars (GITHUB_APP_ID, DESCRIBE_HOOK_URL)
 ```
 
@@ -54,8 +54,8 @@ Set via `wrangler secret put <NAME>`:
 
 ## Config file loading order
 
-1. `{repo}/.github/pr-minder.jsonc` — per-repo (highest priority)
-2. `{org}/.github` repo, `.github/config/pr-minder/pr-minder.jsonc` → `repos.{repo}` field for per-repo overrides, top-level for org defaults
+1. `{repo}/.github/config/pr-minder/pr-minder.jsonc` — per-repo (highest priority)
+2. `{org}/.github` repo, `.github/config/pr-minder/pr-minder.jsonc` (same path) → `repos.{repo}` field for per-repo overrides, top-level for org defaults
 3. No config found → everything disabled (opt-in design; nothing fires by default)
 
 `loadConfig` runs on essentially every webhook event and each resolution is up to two Contents API calls (per-repo file, then the org `.github` file — the common case is a 404 + a hit/404). To avoid hammering the API for config that rarely changes, the resolved result is **memoized per `owner/repo` for 60s** (`CONFIG_CACHE_TTL_MS`) in a module-scope `Map` — same per-isolate-lifetime pattern as `handlers.ts`'s `labelCheckedAt`. Consequences: a config edit takes up to 60s to take effect, and the cache key is `owner/repo` only (the resolved config is identical regardless of which install token reads it). Only **definitive** resolutions are cached: a transient fetch failure (5xx/throttling/network — `fetchRepoFile` throws on any non-2xx that isn't a 404) degrades to "disabled" for that one event but is **not** cached, so the next event retries instead of being stuck with an empty config for a full TTL. A 404 (file absent) and a malformed-JSON file are definitive and *are* cached.
