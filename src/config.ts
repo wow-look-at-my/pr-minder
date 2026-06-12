@@ -50,12 +50,11 @@ export interface AutoDescribePr {
   model: string; // '' means the webhook's default model (its AI_MODEL env)
 }
 
-// Per-repo and org configs live at the same path; they differ only by repo. The per-repo file is
-// {owner}/{repo}/.github/config/pr-minder/pr-minder.jsonc; the org default is the same path in the
-// owner's `.github` repo. (For the `.github` repo itself the two coincide — the per-repo read finds
-// the org file and uses it directly, which is harmless.)
-const PER_REPO_CONFIG = '.github/config/pr-minder/pr-minder.jsonc';
-const ORG_CONFIG = '.github/config/pr-minder/pr-minder.jsonc';
+// Repo-relative path of the config file. The SAME path is read in two places: the per-repo file at
+// {owner}/{repo}/<CONFIG_PATH>, and the org default at the same path in the owner's `.github` repo.
+// One constant so the two can never drift apart. (For the `.github` repo itself the two reads
+// coincide — the per-repo read finds the org file and uses it directly, which is harmless.)
+const CONFIG_PATH = '.github/config/pr-minder/pr-minder.jsonc';
 
 export const DEFAULT_LABEL_COLOR = '00FF00';
 
@@ -73,7 +72,7 @@ const CONFIG_CACHE_TTL_MS = 60_000;
 const configCache = new Map<string, { config: PrMinderConfig; expires: number }>();
 
 // Per-isolate cache of the *org-level* config file, keyed on `owner` alone. The org `.github` file
-// (ORG_CONFIG) is identical for every repo in an org, but the resolved-config cache above is keyed
+// (at CONFIG_PATH) is identical for every repo in an org, but the resolved-config cache above is keyed
 // on `owner/repo`, so a sweep across an org's repos would otherwise re-fetch that one shared file
 // once per repo (the dominant cost of a cross-repo reconcile). Memoizing the parsed org JSON by
 // owner collapses that to a single fetch per owner per TTL. Stores the parsed JSON (or null when the
@@ -123,7 +122,7 @@ async function resolveConfig(owner: string, repo: string, token: string, log: Lo
 
   let perRepo: string | null = null;
   try {
-    perRepo = await fetchRepoFile(owner, repo, PER_REPO_CONFIG, token, log);
+    perRepo = await fetchRepoFile(owner, repo, CONFIG_PATH, token, log);
   } catch (e) {
     log.log(`config: per-repo fetch failed: ${(e as Error).message}`);
     cacheable = false;
@@ -131,7 +130,7 @@ async function resolveConfig(owner: string, repo: string, token: string, log: Lo
   if (perRepo !== null) {
     try {
       const config = mergeConfig(parseJsonc(perRepo), null);
-      log.log(`config: per-repo ${owner}/${repo}/${PER_REPO_CONFIG}`);
+      log.log(`config: per-repo ${owner}/${repo}/${CONFIG_PATH}`);
       return { config, cacheable };
     } catch (e) {
       log.log(`config: per-repo parse failed: ${(e as Error).message}`);
@@ -164,7 +163,7 @@ async function loadOrgConfig(owner: string, token: string, log: Logger): Promise
 
   let orgJson: string | null;
   try {
-    orgJson = await fetchRepoFile(owner, '.github', ORG_CONFIG, token, log);
+    orgJson = await fetchRepoFile(owner, '.github', CONFIG_PATH, token, log);
   } catch (e) {
     log.log(`config: org fetch failed: ${(e as Error).message}`);
     return { parsed: null, ok: false }; // transient — don't cache, force a retry next event
