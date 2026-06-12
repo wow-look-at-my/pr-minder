@@ -9,11 +9,8 @@
 import type { Env } from './worker';
 import type { Logger } from './logger';
 import type { PrMinderConfig } from './config';
-import { getPullDiff, postIssueComment } from './github';
-import {
-  describedDiffHash, markDescribed, describeRunId, markDescribeRun,
-  describeErrorSig, markDescribeError, clearDescribeError,
-} from './state';
+import { getPullDiff } from './github';
+import { describedDiffHash, markDescribed, describeRunId, markDescribeRun } from './state';
 
 // A diff larger than this is truncated before being handed off — enough for any PR a
 // description meaningfully summarizes, and a guard against blowing the model's context
@@ -46,8 +43,8 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
   if (!env.DESCRIBE_HOOK_URL) {
     // Reaching this function at all means auto_describe_pr is *enabled* in config (the caller
     // gates on it). An enabled feature with no endpoint is a misconfiguration, not an opt-out:
-    // fail loud — a silent skip here once cost a full debugging round of "did the webhook even
-    // arrive?". describeAndReport surfaces this on the PR itself.
+    // throw so describeSafely logs it at error level — a silent info-level skip here once cost
+    // a full debugging round of "did the webhook even arrive?".
     throw new Error(
       'auto_describe_pr is enabled in config, but the DESCRIBE_HOOK_URL var is not set on the pr-minder Worker (it belongs in wrangler.toml [vars] — dashboard-added vars are wiped on the next deploy)',
     );
@@ -116,56 +113,20 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
   if (env.PR_STATE) {
     if (typeof runId === 'string' && runId) await markDescribeRun(env.PR_STATE, repo, pr.number, runId);
     await markDescribed(env.PR_STATE, repo, pr.number, hash);
-    // A clean hand-off resets the error-comment dedup, so if the same failure ever returns
-    // after this recovery it is reported loudly again instead of being suppressed as "known".
-    await clearDescribeError(env.PR_STATE, repo, pr.number);
   }
 }
 
-// maybeDescribePr with loud failure reporting: any error — missing var, key mismatch, runner
-// down — is logged at error level AND posted as a comment on the PR, i.e. exactly where the
-// missing description would have been, not only in Worker logs nobody is tailing. The comment
-// is deduped via KV on the error text (at most one per distinct error per PR per day; a
-// successful hand-off clears the marker). Never rejects: describing must never fail the
-// webhook, and the last-resort failure path is the error log (Workers Logs has observability
-// enabled).
-export async function describeAndReport(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
-  const tag = `${repo}#${pr.number}`;
+// maybeDescribePr that never rejects: any error — missing var while enabled, key mismatch,
+// runner down — is logged at error level, which Workers Logs persists ([observability] is
+// enabled). Errors stay in the operator's panes by design: Worker-side failures here, and
+// everything that reaches the runner (denied keys, failed runs) on its dashboard — never as
+// comments broadcast on the PR. Describing must never fail the webhook.
+export async function describeSafely(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
   try {
     await maybeDescribePr(env, repo, pr, config, token, log);
   } catch (e) {
-    const msg = (e as Error).message;
-    log.error(`${tag}: describe failed: ${msg}`);
-    try {
-      if (env.PR_STATE && (await describeErrorSig(env.PR_STATE, repo, pr.number)) === msg) {
-        log.log(`${tag}: describe error already reported on the PR; comment suppressed`);
-        return;
-      }
-      await postIssueComment(repo, pr.number, describeErrorComment(msg), token, log);
-      if (env.PR_STATE) await markDescribeError(env.PR_STATE, repo, pr.number, msg);
-    } catch (e2) {
-      log.error(`${tag}: could not report the describe failure on the PR: ${(e2 as Error).message}`);
-    }
+    log.error(`${repo}#${pr.number}: describe failed: ${(e as Error).message}`);
   }
-}
-
-// The PR comment for a describe failure. Loud and self-explanatory: states the feature, the
-// exact error, and the retry/dedup behavior, so the reader needs no access to Worker logs or
-// the runner dashboard to know what broke. The HTML marker identifies pr-minder's own error
-// comments (e.g. for cleanup tooling); issue_comment is not an event the App subscribes to,
-// so posting can never loop.
-function describeErrorComment(msg: string): string {
-  return [
-    ':warning: **pr-minder: `auto_describe_pr` is enabled for this repository but failed on this PR.**',
-    '',
-    '```',
-    msg,
-    '```',
-    '',
-    '_pr-minder retries on the next push to this PR. This comment repeats at most once per day per distinct error._',
-    '',
-    '<!-- pr-minder:describe-error -->',
-  ].join('\n');
 }
 
 async function sha256Hex(text: string): Promise<string> {
