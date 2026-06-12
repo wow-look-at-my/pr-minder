@@ -2,7 +2,7 @@ import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
 import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, gh } from './github';
 import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, markSwept, recentlySwept } from './state';
-import { describeAndReport, shouldDescribe } from './describe';
+import { describeSafely, shouldDescribe } from './describe';
 import type { Logger } from './logger';
 
 // Runs side work (the auto_describe_pr hand-off to the pr-describe webhook) outside the
@@ -245,11 +245,11 @@ async function onPR(p: any, env: Env, log: Logger, defer?: Defer): Promise<void>
   // fast subrequests (diff fetch, cancel, hook POST) that needn't delay the webhook ack.
   // Scheduled before the zombie-revive early return below so a PR we close+reopen is still
   // described from this event (our reopen comes back as `reopened`, which shouldDescribe
-  // excludes). Failures never fail the webhook, but they are NOT silent: describeAndReport
-  // posts them as a comment on the PR (deduped per distinct error), because an enabled
-  // feature failing invisibly cost a debugging round once already.
+  // excludes). Failures never fail the webhook, but they are NOT silent either: describeSafely
+  // logs them at error level (Workers Logs), because an enabled feature failing invisibly
+  // cost a debugging round once already. Operator surfaces only — never PR comments.
   if (config.autoDescribePr.enabled && shouldDescribe(action)) {
-    const work = describeAndReport(env, repo, pr, config, token, log);
+    const work = describeSafely(env, repo, pr, config, token, log);
     if (defer) defer(work); else await work;
   }
 

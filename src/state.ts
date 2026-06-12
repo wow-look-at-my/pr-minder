@@ -103,26 +103,6 @@ export async function markDescribeRun(kv: KVNamespace, repo: string, num: number
   await kv.put(descRunKey(repo, num), runId, { expirationTtl: DESC_RUN_TTL_S });
 }
 
-// The last describe failure reported on a PR (the error text itself). Gates the loud
-// PR-comment error reporting in describe.ts: the same persistent error re-posts at most once
-// per TTL instead of on every push, while a *different* error posts immediately. Cleared on a
-// successful hand-off, so an error that recurs after recovery is loud again. Recorded only
-// after the comment lands, so a failed post retries on the next event.
-const descErrKey = (repo: string, num: number) => `descerr:${repo}#${num}`;
-const DESC_ERR_TTL_S = 86400;
-
-export async function describeErrorSig(kv: KVNamespace, repo: string, num: number): Promise<string | null> {
-  return kv.get(descErrKey(repo, num));
-}
-
-export async function markDescribeError(kv: KVNamespace, repo: string, num: number, sig: string): Promise<void> {
-  await kv.put(descErrKey(repo, num), sig, { expirationTtl: DESC_ERR_TTL_S });
-}
-
-export async function clearDescribeError(kv: KVNamespace, repo: string, num: number): Promise<void> {
-  await kv.delete(descErrKey(repo, num));
-}
-
 // Per-owner cooldown for the auto-merge backstop (reconcileInstall). The backstop is cheap (a label
 // search plus a handful of GitHub calls), but GitHub's search API is rate-limited (~30/min), so we
 // don't want to run it on every webhook for a busy owner. markSwept records "owner just backstopped"

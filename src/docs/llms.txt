@@ -138,7 +138,7 @@ It runs on a push to a non-default branch (opening the PR as soon as the branch 
 - The work is deduped on a hash of the diff, so a commit that doesn't change the PR's effective diff (e.g. pr-minder's own branch-update merge) costs no model call. It can't loop: editing a PR's text isn't an event pr-minder reacts to.
 - The slow model call doesn't run in the worker (real LLM calls outlive its time limits): the worker hands the diff to an internal webhook, fire-and-forget, which calls the model — retrying transient failures itself — and edits the PR. If newer commits arrive while a run is still in flight, the stale run is cancelled so descriptions can't land out of order.
 - The webhook endpoint and its key are configured on the worker by whoever operates it; the model endpoint/key live with the webhook. Neither appears in repo config.
-- **Failures are loud.** If the feature is enabled but misconfigured (no webhook URL on the worker), or the hand-off to the webhook fails (bad key, webhook down), pr-minder posts the error as a comment on the PR — repeated at most once per day per distinct error, and reset once a hand-off succeeds. An enabled feature never silently does nothing.
+- **Failures are never silent — and never public.** If the feature is enabled but misconfigured (no webhook URL on the worker), or the hand-off fails (bad key, webhook down), pr-minder logs the error at error level for the operator (and the internal webhook runner's dashboard shows everything that reaches it: denied requests, failed runs). Nothing is ever posted on the PR; an enabled feature never silently does nothing.
 
 ```jsonc
 {
