@@ -48,7 +48,7 @@ describe('maybeDescribePr', () => {
 
   const HOOK = 'https://hooks.example/hook/pr-describe';
   const makeEnv = (kv: any, over: Record<string, unknown> = {}): any =>
-    ({ PR_STATE: kv, DESCRIBE_HOOK_URL: HOOK, DESCRIBE_HOOK_API_KEY: 'hook-key', ...over });
+    ({ PR_STATE: kv, DESCRIBE_HOOK_URL: HOOK, DESCRIBE_HOOK_API_KEY: 'hook-key', PR_MINDER_PUBLIC_URL: 'https://pm.example', ...over });
   const cfg = (over: Partial<PrMinderConfig['autoDescribePr']> = {}): PrMinderConfig =>
     ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], targetBase: '' }, autoDescribePr: { enabled: true, model: '', ...over } });
   const pr = { number: 7, title: 'claude/foo-123', body: 'old human notes' };
@@ -71,17 +71,19 @@ describe('maybeDescribePr', () => {
     const post = fetchMock.mock.calls.find(([u]) => (u as string) === HOOK)!;
     expect((post[1] as any).headers['x-api-key']).toBe('hook-key');
     const payload = JSON.parse((post[1] as any).body);
-    expect(payload).toEqual({
-      repo: 'o/r',
-      pr_number: 7,
-      old_title: 'claude/foo-123',
-      old_body: 'old human notes',
-      diff: DIFF,
-      model: '',
-      github_token: 'tok',
-    });
+    expect(payload.repo).toBe('o/r');
+    expect(payload.pr_number).toBe(7);
+    expect(payload.old_title).toBe('claude/foo-123');
+    expect(payload.old_body).toBe('old human notes');
+    expect(payload.diff).toBe(DIFF);
+    expect(payload.model).toBe('');
+    expect(payload.github_token).toBe('tok');
+    // The hard-contract failure-callback fields are always sent.
+    expect(payload.fail_callback_url).toBe('https://pm.example/_describe-result');
+    expect(payload.fail_callback_key).toBe('hook-key');
+    expect(payload.diff_hash).toMatch(/^[0-9a-f]{64}$/);
 
-    expect(store.get('desc:o/r#7')).toMatch(/^[0-9a-f]{64}$/); // diff fingerprint recorded
+    expect(store.get('desc:o/r#7')).toBe(payload.diff_hash); // recorded marker == the hash sent for the callback
     expect(store.get('descrun:o/r#7')).toBe('run-abc'); // run id remembered for cancellation
   });
 
@@ -135,6 +137,14 @@ describe('maybeDescribePr', () => {
     await expect(maybeDescribePr(makeEnv(kv, { DESCRIBE_HOOK_URL: undefined }), 'o/r', pr, cfg(), 'tok', new Logger()))
       .rejects.toThrow(/DESCRIBE_HOOK_URL/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('throws on missing PR_MINDER_PUBLIC_URL — the failure-callback URL is required, not optional', async () => {
+    const { kv } = fakeKV();
+    const fetchMock = routeFetch([]);
+    await expect(maybeDescribePr(makeEnv(kv, { PR_MINDER_PUBLIC_URL: undefined }), 'o/r', pr, cfg(), 'tok', new Logger()))
+      .rejects.toThrow(/PR_MINDER_PUBLIC_URL/);
+    expect(fetchMock).not.toHaveBeenCalled(); // checked before any diff fetch or hand-off
   });
 
   it('skips quietly when the diff is empty', async () => {
