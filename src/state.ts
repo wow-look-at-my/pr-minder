@@ -103,6 +103,17 @@ export async function markDescribeRun(kv: KVNamespace, repo: string, num: number
   await kv.put(descRunKey(repo, num), runId, { expirationTtl: DESC_RUN_TTL_S });
 }
 
+// Drop a PR's described-diff marker after the pr-describe webhook reports its run terminally
+// failed, so the next event re-describes. The marker is recorded optimistically on hand-off (the
+// runner accepting the run), so without this a run that fails *after* acceptance would leave the
+// PR marked described forever. Conditional on the hash: a late failure callback from a superseded
+// run can't wipe a newer, successful describe — only clear when desc: still holds exactly that
+// diff's hash. (descrun: is left to its TTL; the next hand-off cancels a stale id harmlessly.)
+export async function clearDescribedIfHash(kv: KVNamespace, repo: string, num: number, hash: string): Promise<void> {
+  if (!hash) return;
+  if ((await kv.get(descKey(repo, num))) === hash) await kv.delete(descKey(repo, num));
+}
+
 // Per-owner cooldown for the auto-merge backstop (reconcileInstall). The backstop is cheap (a label
 // search plus a handful of GitHub calls), but GitHub's search API is rate-limited (~30/min), so we
 // don't want to run it on every webhook for a busy owner. markSwept records "owner just backstopped"

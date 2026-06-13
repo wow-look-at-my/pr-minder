@@ -337,18 +337,54 @@ export async function getPull(repo: string, num: number, token: string, log: Log
 }
 
 // The full unified diff of a PR — the whole base...head diff, not one push — via the
-// `application/vnd.github.diff` media type on the PR endpoint. Null on any error, including the
-// documented 406 when the diff is too large for GitHub to render, so callers skip instead of
-// failing the event.
+// `application/vnd.github.diff` media type on the PR endpoint. When GitHub refuses to render
+// that for a very large PR (the documented 406), fall back to reassembling the diff from the
+// paginated files API, so even an enormous PR still yields a diff to describe (no size ceiling;
+// the pr-describe webhook summarizes a large diff in parts). Null only on other errors or an
+// empty result, so callers still skip the event in those cases.
 export async function getPullDiff(repo: string, num: number, token: string, log: Logger): Promise<string | null> {
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
     headers: { ...ghHeaders(token), accept: 'application/vnd.github.diff' },
   });
-  if (!r.ok) {
-    log.log(`getPullDiff ${repo}#${num}: ${r.status}`);
-    return null;
+  if (r.ok) return r.text();
+  if (r.status === 406) {
+    log.log(`getPullDiff ${repo}#${num}: 406 (diff too large to render), falling back to the files API`);
+    return assembleDiffFromFiles(repo, num, token, log);
   }
-  return r.text();
+  log.log(`getPullDiff ${repo}#${num}: ${r.status}`);
+  return null;
+}
+
+// Reassemble a unified-diff-like document from the PR files API (paginated, up to GitHub's
+// 3000-file cap). Each file contributes a `diff --git` header and its `patch` hunks; a file
+// with no textual patch (binary, or individually too large for GitHub to include) gets a short
+// placeholder so the model still sees that it changed. Approximate but faithful enough to
+// describe — used only when the real unified diff is unavailable (406).
+async function assembleDiffFromFiles(repo: string, num: number, token: string, log: Logger): Promise<string | null> {
+  const parts: string[] = [];
+  for (let page = 1; ; page++) {
+    const r = await gh(`/repos/${repo}/pulls/${num}/files?per_page=100&page=${page}`, token, log);
+    if (!r.ok) {
+      log.log(`getPullDiff ${repo}#${num}: files page ${page} -> ${r.status}`);
+      break;
+    }
+    const files: any[] = await r.json();
+    if (!Array.isArray(files) || files.length === 0) break;
+    for (const f of files) {
+      const name: string = f.filename;
+      const prev: string = f.previous_filename || name;
+      parts.push(`diff --git a/${prev} b/${name}\n`);
+      if (f.status === 'renamed' && prev !== name) parts.push(`rename from ${prev}\nrename to ${name}\n`);
+      if (typeof f.patch === 'string' && f.patch) {
+        parts.push(`--- a/${prev}\n+++ b/${name}\n${f.patch}\n`);
+      } else {
+        parts.push(`(no textual patch: status=${f.status}, +${f.additions ?? 0}/-${f.deletions ?? 0})\n`);
+      }
+    }
+    if (files.length < 100) break;
+  }
+  const diff = parts.join('');
+  return diff.trim() ? diff : null;
 }
 
 export async function listInstallationRepos(token: string, log: Logger): Promise<string[]> {

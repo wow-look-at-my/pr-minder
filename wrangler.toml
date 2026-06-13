@@ -52,3 +52,9 @@ GITHUB_APP_ID = "3433933"
 # never a silent skip. The model endpoint/key live with the webhook, not this Worker; a
 # per-repo config can still override the model (auto_describe_pr.model).
 DESCRIBE_HOOK_URL = "https://hooks.pazer.io/hook/pr-describe"
+# The Worker's own public URL. pr-minder passes "{this}/_describe-result" to the pr-describe
+# webhook so a terminally failed describe run is reported back and the diff's "already described"
+# marker cleared, letting the next event retry (the marker is recorded optimistically on hand-off).
+# Committed here in [vars] for the same reason as DESCRIBE_HOOK_URL (a dashboard var evaporates on
+# the next deploy). If absent, no callback is requested and a failed run stays recorded as before.
+PR_MINDER_PUBLIC_URL = "https://pr-minder.pazer.workers.dev"

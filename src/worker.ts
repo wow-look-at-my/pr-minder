@@ -5,6 +5,7 @@ import { handle, startupReconcile, runRechecks, reconcileAllInstalls } from './h
 import { GhError } from './github';
 import { Logger } from './logger';
 import { verifyWebhook } from './webhook';
+import { handleDescribeResult } from './describe-result';
 // Docs are gzipped at build time and served pre-compressed (see serveDocs).
 import indexHtmlGz from './docs/index.html.gz';
 import llmsTxtGz from './docs/llms.txt.gz';
@@ -25,6 +26,11 @@ export interface Env {
   // DESCRIBE_HOOK_API_KEY (a secret) its api_key. Without the URL the feature no-ops.
   DESCRIBE_HOOK_URL?: string;
   DESCRIBE_HOOK_API_KEY?: string;
+  // The Worker's own public URL (e.g. https://pr-minder.pazer.workers.dev; wrangler.toml [vars]).
+  // pr-minder passes "{this}/_describe-result" to the pr-describe webhook so a terminally failed
+  // describe run is reported back and its "already described" marker cleared (the next event then
+  // retries). Absent it, no callback is requested and a failed run stays recorded (original behavior).
+  PR_MINDER_PUBLIC_URL?: string;
 }
 
 // Reconcile-on-startup, not poll. Each fresh isolate (e.g. after a deploy) runs the cross-repo
@@ -45,6 +51,16 @@ export default {
     if (req.method !== 'POST') return new Response('nope', { status: 405 });
 
     const body = await req.text();
+    const log = new Logger();
+
+    // The pr-describe webhook reports a terminally failed describe run here so the diff's
+    // "already described" marker is cleared and the next event re-describes. Its own path (the
+    // GitHub delivery POSTs to "/") and its own auth (shared api key, not the GitHub HMAC) — both
+    // handled in handleDescribeResult, kept out of worker.ts so it stays testable.
+    if (new URL(req.url).pathname === '/_describe-result') {
+      return handleDescribeResult(env, req.headers.get('x-api-key') ?? '', body, log);
+    }
+
     const sig = req.headers.get('x-hub-signature-256') ?? '';
     if (!(await verifyWebhook(env.WEBHOOK_SECRET, sig, body))) {
       return new Response('bad sig', { status: 401 });
@@ -53,7 +69,6 @@ export default {
     const event = req.headers.get('x-github-event');
     const payload = JSON.parse(body);
 
-    const log = new Logger();
     let status = 200;
     try {
       // The defer callback lets slow side work (the auto_describe_pr model call) run via
