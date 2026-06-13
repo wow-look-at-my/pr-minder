@@ -163,18 +163,37 @@ export async function hasOpenPrForBranch(repo: string, branch: string, token: st
   return data.length > 0;
 }
 
-export async function listBranches(repo: string, token: string, log: Logger): Promise<string[]> {
-  const names: string[] = [];
+// Every branch as { name, sha-of-HEAD }, following pagination. The SHA lets a caller map a commit
+// back to the branch(es) whose HEAD it is — the signal fork-point base detection relies on. Returns
+// [] on a query error, so a sweep degrades to "nothing to do" instead of throwing.
+export async function listBranchHeads(repo: string, token: string, log: Logger): Promise<{ name: string; sha: string }[]> {
+  const heads: { name: string; sha: string }[] = [];
   let page = 1;
   for (;;) {
     const r = await gh(`/repos/${repo}/branches?per_page=100&page=${page}`, token, log);
     if (!r.ok) break;
     const data: any[] = await r.json();
-    for (const b of data) names.push(b.name);
+    for (const b of data) if (typeof b?.name === 'string' && typeof b?.commit?.sha === 'string') heads.push({ name: b.name, sha: b.commit.sha });
     if (data.length < 100) break;
     page++;
   }
-  return names;
+  return heads;
+}
+
+// Commit SHAs reachable from `ref`, newest first, following pagination up to maxPages (default 2, so
+// up to 200 commits). Used to find where a working branch forked from a long-lived base: that fork
+// point sits near the branch tip, so we never need deep history and the page cap bounds the cost.
+// Returns [] on a query error.
+export async function listCommitShas(repo: string, ref: string, token: string, log: Logger, maxPages = 2): Promise<string[]> {
+  const shas: string[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const r = await gh(`/repos/${repo}/commits?sha=${ref}&per_page=100&page=${page}`, token, log);
+    if (!r.ok) break;
+    const data: any[] = await r.json();
+    for (const c of data) if (typeof c?.sha === 'string') shas.push(c.sha);
+    if (data.length < 100) break;
+  }
+  return shas;
 }
 
 // Every open PR in the repo, following pagination. Items are the raw GitHub PR objects

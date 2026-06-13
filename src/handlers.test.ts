@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile } from './handlers';
+import { conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile } from './handlers';
 import { Logger } from './logger';
 import { resetConfigCache, type PrMinderConfig } from './config';
 
@@ -128,6 +128,57 @@ describe('shouldSkipBranch', () => {
 
   it('does not skip an ordinary feature branch', () => {
     expect(shouldSkipBranch('feature/x', 'main', ['staging'])).toBe(false);
+  });
+
+  it('skips branches matching a skip pattern (e.g. version branches)', () => {
+    const versionRe = ['^\\d+\\.\\d+\\.\\d+$'];
+    expect(shouldSkipBranch('2.1.81', 'master', [], versionRe)).toBe(true);
+    expect(shouldSkipBranch('0.2.100', 'master', [], versionRe)).toBe(true);
+    expect(shouldSkipBranch('claude/foo-123', 'master', [], versionRe)).toBe(false);
+    expect(shouldSkipBranch('2.1.81-rc', 'master', [], versionRe)).toBe(false); // anchored, no partial match
+  });
+
+  it('a malformed skip pattern never throws, it just does not match', () => {
+    expect(shouldSkipBranch('anything', 'master', [], ['(['])).toBe(false);
+  });
+});
+
+describe('detectForkBase', () => {
+  // Stub the commits listing (GET /repos/{repo}/commits?sha={branch}) used by detectForkBase. The
+  // array is newest-first, exactly as the GitHub API returns it.
+  const stubCommits = (shas: string[]) => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => shas.map((sha) => ({ sha })) })));
+  };
+  afterEach(() => vi.unstubAllGlobals());
+  const versionRe = ['^\\d+\\.\\d+\\.\\d+$'];
+
+  it('routes a working branch to the version branch it forked from', async () => {
+    // claude/x = one work commit on top of 2.1.81's tip (an archive branch whose tip never moves).
+    stubCommits(['work1', 'vtip']);
+    const tips = new Map([['vtip', ['2.1.81']], ['work1', ['claude/x']]]);
+    const r = await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger());
+    expect(r).toEqual({ base: '2.1.81', ahead: 1 });
+  });
+
+  it('routes a branch forked off the default branch to the default branch', async () => {
+    stubCommits(['work1', 'work0', 'mtip']);
+    const tips = new Map([['mtip', ['master']], ['work1', ['claude/infra']]]);
+    const r = await detectForkBase('o/r', 'claude/infra', 'master', versionRe, tips, 'tok', new Logger());
+    expect(r).toEqual({ base: 'master', ahead: 2 });
+  });
+
+  it('returns null when no ancestor is a qualifying branch tip (caller falls back to default)', async () => {
+    stubCommits(['work1', 'oldmaster']); // oldmaster is no branch tip (default branch has moved on)
+    const tips = new Map([['mtip', ['master']], ['vtip', ['2.1.81']]]);
+    expect(await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger())).toBeNull();
+  });
+
+  it('never picks the branch itself, and skips a non-qualifying parent branch', async () => {
+    // claude/x forked off claude/parent (not a version, not default) which forked off 2.1.81.
+    stubCommits(['work1', 'ptip', 'vtip']);
+    const tips = new Map([['work1', ['claude/x']], ['ptip', ['claude/parent']], ['vtip', ['2.1.81']]]);
+    const r = await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger());
+    expect(r).toEqual({ base: '2.1.81', ahead: 2 });
   });
 });
 
@@ -265,7 +316,7 @@ describe('reconcileAutoMerge', () => {
 
   const label = (name: string) => ({ name });
   const cfg = (labels: PrMinderConfig['labels']): PrMinderConfig =>
-    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], targetBase: '' }, autoDescribePr: { enabled: false, model: '' } });
+    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [] }, autoDescribePr: { enabled: false, model: '' } });
   const autoMergeLabel = { auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode: 'auto_merge' as const, auto_merge_method: 'squash' as const };
 
   afterEach(() => vi.unstubAllGlobals());
