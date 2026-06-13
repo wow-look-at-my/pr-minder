@@ -12,10 +12,6 @@ import type { PrMinderConfig } from './config';
 import { getPullDiff } from './github';
 import { describedDiffHash, markDescribed, describeRunId, markDescribeRun } from './state';
 
-// A diff larger than this is truncated before being handed off — enough for any PR a
-// description meaningfully summarizes, and a guard against blowing the model's context
-// window (the webhook forwards the diff to the model as-is).
-const MAX_DIFF_CHARS = 200_000;
 // The hand-off is a 202 from webhook-runner (it only spawns a container), so a short
 // timeout keeps a wedged runner from pinning the invocation.
 const HOOK_TIMEOUT_MS = 10_000;
@@ -50,14 +46,15 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
     );
   }
 
-  const fullDiff = await getPullDiff(repo, pr.number, token, log);
-  if (!fullDiff || !fullDiff.trim()) {
+  // The full base...head diff, never truncated: the pr-describe webhook summarizes an
+  // oversized diff in parts (map-reduce) rather than the Worker capping it, so there is
+  // no diff-size ceiling on what gets described. getPullDiff itself falls back to the
+  // paginated files API when GitHub refuses to render the unified diff (406, very large).
+  const diff = await getPullDiff(repo, pr.number, token, log);
+  if (!diff || !diff.trim()) {
     log.log(`${tag}: skip describe (no diff)`);
     return;
   }
-  const diff = fullDiff.length > MAX_DIFF_CHARS
-    ? `${fullDiff.slice(0, MAX_DIFF_CHARS)}\n... (diff truncated at ${MAX_DIFF_CHARS} characters)`
-    : fullDiff;
 
   const hash = await sha256Hex(diff);
   if (env.PR_STATE && (await describedDiffHash(env.PR_STATE, repo, pr.number)) === hash) {

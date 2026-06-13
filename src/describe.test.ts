@@ -137,14 +137,34 @@ describe('maybeDescribePr', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('skips quietly when the diff is unavailable (e.g. 406 too large) or empty', async () => {
+  it('skips quietly when the diff is empty', async () => {
     const { kv } = fakeKV();
-    routeFetch([{ match: '/pulls/7', status: 406, body: 'too big' }]);
-    await maybeDescribePr(makeEnv(kv), 'o/r', pr, cfg(), 'tok', new Logger());
-
     const fetchMock = routeFetch([{ match: '/pulls/7', body: '' }]);
     await maybeDescribePr(makeEnv(kv), 'o/r', pr, cfg(), 'tok', new Logger());
-    expect(fetchMock).toHaveBeenCalledTimes(1); // diff GET only — no hook POST either time
+    expect(fetchMock).toHaveBeenCalledTimes(1); // diff GET only — no hook POST
+  });
+
+  it('falls back to the files API when the unified diff is 406 (too large), then hands off the reassembled diff', async () => {
+    const { kv, store } = fakeKV();
+    const files = [
+      { filename: 'src/a.ts', status: 'modified', additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' },
+      { filename: 'img.png', status: 'added', additions: 0, deletions: 0 }, // binary: no patch
+    ];
+    const fetchMock = routeFetch([
+      { match: '/pulls/7/files', body: files }, // more specific match must come first
+      { match: '/pulls/7', status: 406, body: 'too big' },
+      { match: '/hook/pr-describe', method: 'POST', status: 202, body: { run_id: 'run-z' } },
+    ]);
+    await maybeDescribePr(makeEnv(kv), 'o/r', pr, cfg(), 'tok', new Logger());
+
+    const post = fetchMock.mock.calls.find(([u]) => (u as string) === HOOK)!;
+    expect(post).toBeTruthy();
+    const sentDiff = JSON.parse((post[1] as any).body).diff as string;
+    expect(sentDiff).toContain('diff --git a/src/a.ts b/src/a.ts');
+    expect(sentDiff).toContain('+b');
+    expect(sentDiff).toContain('diff --git a/img.png b/img.png');
+    expect(sentDiff).toContain('no textual patch: status=added');
+    expect(store.get('descrun:o/r#7')).toBe('run-z'); // handed off, run remembered
   });
 
   it('passes the per-repo model override through the payload', async () => {
