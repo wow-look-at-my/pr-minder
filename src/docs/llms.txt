@@ -108,10 +108,15 @@ It will not loop: pr-minder's own reopen comes back as a `reopened` event sent b
 | Field | Meaning |
 |-------|---------|
 | `enabled` | Turn the feature on (default `false`). |
-| `skip_branches` | Extra branch names to never open PRs for. The default branch and `gh-pages` are always skipped. |
-| `target_base` | Base branch for opened PRs (default: the repo's default branch). |
+| `skip_branches` | Extra branch names (exact match) to never open PRs for. The default branch and `gh-pages` are always skipped. |
+| `skip_branch_patterns` | Extra branches to never open PRs for, as regex patterns matched against the branch name (anchor with `^...$`). Excludes a whole family at once — e.g. `["^\\d+\\.\\d+\\.\\d+$"]` keeps version branches like `2.1.81` from each becoming a PR head. A malformed pattern simply never matches. |
+| `target_base` | Base branch for opened PRs (default: the repo's default branch). When `base_from_fork_point` is on, this is the fallback used when no fork point is detected. |
+| `base_from_fork_point` | Detect each branch's base from its **fork point** instead of always using `target_base` (default `false`). |
+| `base_branch_patterns` | When `base_from_fork_point` is on, which non-default branches may be selected as a base (regex patterns). The default branch always qualifies. |
 
 It runs on a push to a non-default branch (opening the PR as soon as the branch gets a commit) and sweeps existing branches once when the App is installed or repositories are added. Fork branches are not opened.
+
+**Fork-point base detection.** With `base_from_fork_point: true`, pr-minder picks the base by walking the branch's commits newest-first and taking the first ancestor that is the HEAD of another *qualifying* branch — the default branch, or one matching `base_branch_patterns`. This suits an archive/version-branch layout: an investigation branch forked from a long-lived version branch (whose tip never moves, so it *is* the fork point) is opened back into that version branch, while a branch forked off the default branch goes into the default branch. When no qualifying fork point is found it falls back to `target_base` (or the default branch).
 
 ```jsonc
 {
@@ -119,6 +124,19 @@ It runs on a push to a non-default branch (opening the PR as soon as the branch 
     "enabled": true,
     "skip_branches": ["staging"],
     "target_base": ""
+  }
+}
+```
+
+Archive-repo example — open each working branch back into the version branch it forked from, and never open a PR from a version branch itself:
+
+```jsonc
+{
+  "auto_open_pr": {
+    "enabled": true,
+    "skip_branch_patterns": ["^\\d+\\.\\d+\\.\\d+$"],
+    "base_from_fork_point": true,
+    "base_branch_patterns": ["^\\d+\\.\\d+\\.\\d+$"]
   }
 }
 ```

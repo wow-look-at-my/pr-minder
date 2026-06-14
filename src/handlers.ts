@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranches, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, gh } from './github';
 import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, markSwept, recentlySwept } from './state';
 import { describeSafely, shouldDescribe } from './describe';
 import type { Logger } from './logger';
@@ -363,20 +363,88 @@ async function onPushToBranch(p: any, env: Env, log: Logger): Promise<void> {
   await maybeOpenPrForBranch(repo, branch, base, config, token, log);
 }
 
-// The default branch and gh-pages are always skipped; the config can skip more.
-export function shouldSkipBranch(branch: string, base: string, skipBranches: string[]): boolean {
-  return new Set<string>(['gh-pages', base, ...skipBranches]).has(branch);
+// The default branch and gh-pages are always skipped; the config can skip more by exact name or by
+// regex pattern (e.g. version branches in an archive repo, so they never each become a PR head).
+export function shouldSkipBranch(branch: string, base: string, skipBranches: string[], skipBranchPatterns: string[] = []): boolean {
+  if (new Set<string>(['gh-pages', base, ...skipBranches]).has(branch)) return true;
+  return skipBranchPatterns.some((p) => matchesPattern(branch, p));
 }
 
-async function maybeOpenPrForBranch(repo: string, branch: string, base: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+// Test a branch name against a config-supplied regex. A malformed pattern never throws — it just
+// doesn't match — so a typo in config can't crash a handler.
+function matchesPattern(name: string, pattern: string): boolean {
+  try { return new RegExp(pattern).test(name); } catch { return false; }
+}
+
+// Map each branch HEAD commit SHA -> the branch name(s) at that commit, for fork-point detection.
+function buildTipMap(heads: { name: string; sha: string }[]): Map<string, string[]> {
+  const m = new Map<string, string[]>();
+  for (const h of heads) { const a = m.get(h.sha) ?? []; a.push(h.name); m.set(h.sha, a); }
+  return m;
+}
+
+// Pick the base for a branch from its fork point: walk the branch's commits newest-first and return
+// the first ancestor that is the HEAD of another *qualifying* branch — the repo default branch, or a
+// non-default branch matching one of baseBranchPatterns. In an archive repo a working branch is
+// forked from a long-lived branch (e.g. a version branch) whose tip never moves, so that tip is
+// exactly the fork point and names the base the work should merge back into. `ahead` is how many
+// commits the branch adds on top of that base (its index in the commit list). Returns null when no
+// qualifying ancestor is found, so the caller falls back to the default base. tipsBySha comes from
+// buildTipMap; the branch's own name is excluded so it can't pick itself.
+export async function detectForkBase(
+  repo: string,
+  branch: string,
+  defaultBranch: string,
+  baseBranchPatterns: string[],
+  tipsBySha: Map<string, string[]>,
+  token: string,
+  log: Logger,
+): Promise<{ base: string; ahead: number } | null> {
+  const commits = await listCommitShas(repo, branch, token, log);
+  for (let i = 0; i < commits.length; i++) {
+    const names = tipsBySha.get(commits[i]);
+    if (!names) continue;
+    const base = names.find((n) => n !== branch && (n === defaultBranch || baseBranchPatterns.some((p) => matchesPattern(n, p))));
+    if (base) return { base, ahead: i };
+  }
+  return null;
+}
+
+// Open a PR for one branch into its base, when it's ahead and has no open PR. The base is targetBase
+// (or the repo default) unless base_from_fork_point is on, in which case it's detected from the
+// branch's fork point (see detectForkBase), falling back to the default base. tipsBySha is built once
+// by the caller for a sweep; for a single push it's built here on demand (only when fork-point
+// detection is enabled).
+async function maybeOpenPrForBranch(repo: string, branch: string, defaultBase: string, config: PrMinderConfig, token: string, log: Logger, tipsBySha?: Map<string, string[]>): Promise<void> {
   const tag = `${repo}@${branch}`;
-  if (shouldSkipBranch(branch, base, config.autoOpenPr.skipBranches)) {
+  const ao = config.autoOpenPr;
+  if (shouldSkipBranch(branch, defaultBase, ao.skipBranches, ao.skipBranchPatterns)) {
     log.log(`${tag}: skip (excluded branch)`);
     return;
   }
-  const cmp = await compareCommits(repo, base, branch, token, log);
-  if (!cmp) { log.log(`${tag}: skip (compare failed)`); return; }
-  if (cmp.ahead_by === 0) { log.log(`${tag}: skip (not ahead of ${base})`); return; }
+
+  let base = defaultBase;
+  let ahead: number | null = null;
+  if (ao.baseFromForkPoint) {
+    const tips = tipsBySha ?? buildTipMap(await listBranchHeads(repo, token, log));
+    const detected = await detectForkBase(repo, branch, defaultBase, ao.baseBranchPatterns, tips, token, log);
+    if (detected) {
+      base = detected.base;
+      ahead = detected.ahead;
+      log.log(`${tag}: fork-point base ${base} (+${ahead})`);
+    } else {
+      log.log(`${tag}: no fork-point base, falling back to ${base}`);
+    }
+  }
+  if (base === branch) { log.log(`${tag}: skip (base == head)`); return; }
+
+  // When the fork point gave us the ahead count we trust it; otherwise compare against the base.
+  if (ahead === null) {
+    const cmp = await compareCommits(repo, base, branch, token, log);
+    if (!cmp) { log.log(`${tag}: skip (compare failed)`); return; }
+    ahead = cmp.ahead_by;
+  }
+  if (ahead === 0) { log.log(`${tag}: skip (not ahead of ${base})`); return; }
   if (await hasOpenPrForBranch(repo, branch, token, log)) { log.log(`${tag}: skip (PR already open)`); return; }
 
   const num = await createPull(repo, branch, base, branch, `Automated PR for branch \`${branch}\`.`, token, log);
@@ -389,10 +457,13 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
   if (!config.autoOpenPr.enabled) return;
   const base = config.autoOpenPr.targetBase || (await getDefaultBranch(repo, token, log));
   if (!base) { log.log(`${repo}: skip auto_open_pr sweep (no base branch)`); return; }
-  const branches = await listBranches(repo, token, log);
-  log.log(`${repo}: auto_open_pr sweep over ${branches.length} branches`);
-  for (const branch of branches) {
-    await maybeOpenPrForBranch(repo, branch, base, config, token, log);
+  const heads = await listBranchHeads(repo, token, log);
+  // Build the SHA -> branch-name map once for the whole sweep so per-branch fork-point detection
+  // is a single commits call each (not another branches listing). Skipped branches cost no call.
+  const tips = buildTipMap(heads);
+  log.log(`${repo}: auto_open_pr sweep over ${heads.length} branches`);
+  for (const h of heads) {
+    await maybeOpenPrForBranch(repo, h.name, base, config, token, log, tips);
   }
 }
 
