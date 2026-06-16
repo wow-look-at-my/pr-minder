@@ -415,7 +415,7 @@ export async function detectForkBase(
 // branch's fork point (see detectForkBase), falling back to the default base. tipsBySha is built once
 // by the caller for a sweep; for a single push it's built here on demand (only when fork-point
 // detection is enabled).
-async function maybeOpenPrForBranch(repo: string, branch: string, defaultBase: string, config: PrMinderConfig, token: string, log: Logger, tipsBySha?: Map<string, string[]>): Promise<void> {
+export async function maybeOpenPrForBranch(repo: string, branch: string, defaultBase: string, config: PrMinderConfig, token: string, log: Logger, tipsBySha?: Map<string, string[]>): Promise<void> {
   const tag = `${repo}@${branch}`;
   const ao = config.autoOpenPr;
   if (shouldSkipBranch(branch, defaultBase, ao.skipBranches, ao.skipBranchPatterns)) {
@@ -424,27 +424,34 @@ async function maybeOpenPrForBranch(repo: string, branch: string, defaultBase: s
   }
 
   let base = defaultBase;
-  let ahead: number | null = null;
   if (ao.baseFromForkPoint) {
     const tips = tipsBySha ?? buildTipMap(await listBranchHeads(repo, token, log));
     const detected = await detectForkBase(repo, branch, defaultBase, ao.baseBranchPatterns, tips, token, log);
     if (detected) {
       base = detected.base;
-      ahead = detected.ahead;
-      log.log(`${tag}: fork-point base ${base} (+${ahead})`);
+      log.log(`${tag}: fork-point base ${base} (+${detected.ahead})`);
     } else {
       log.log(`${tag}: no fork-point base, falling back to ${base}`);
     }
   }
   if (base === branch) { log.log(`${tag}: skip (base == head)`); return; }
 
-  // When the fork point gave us the ahead count we trust it; otherwise compare against the base.
-  if (ahead === null) {
-    const cmp = await compareCommits(repo, base, branch, token, log);
-    if (!cmp) { log.log(`${tag}: skip (compare failed)`); return; }
-    ahead = cmp.ahead_by;
-  }
-  if (ahead === 0) { log.log(`${tag}: skip (not ahead of ${base})`); return; }
+  // Gate on the actual base...head comparison, requiring BOTH:
+  //   - ahead_by > 0     : the branch has commits base lacks (else there is nothing to PR), and
+  //   - changed_files > 0 : those commits introduce a NON-EMPTY net diff.
+  // The file-change check is what fixes the orphaned-PR bug. After a squash-merge, a branch's unique
+  // commits already live in base by *content*, but git still counts them as "ahead" (a squash is a
+  // fresh commit sharing no history), so ahead_by stays > 0 while the net diff is empty. Opening then
+  // produces a content-empty PR that auto_describe_pr correctly refuses to describe ("no diff"),
+  // leaving a PR stuck with the branch name as its title/body forever (the #224/#225/#226 case). We
+  // always compare here — even in fork-point mode, where detectForkBase already gave an ahead count —
+  // because emptiness can only be read from the real diff, and one compare per about-to-open branch
+  // (a rare event) is cheap. changed_files === null means GitHub omitted the files array (oversized
+  // response): treat it as "has changes" and open, never suppress a real PR on an unknown.
+  const cmp = await compareCommits(repo, base, branch, token, log);
+  if (!cmp) { log.log(`${tag}: skip (compare failed)`); return; }
+  if (cmp.ahead_by === 0) { log.log(`${tag}: skip (not ahead of ${base})`); return; }
+  if (cmp.changed_files === 0) { log.log(`${tag}: skip (no diff vs ${base} — content already merged)`); return; }
   if (await hasOpenPrForBranch(repo, branch, token, log)) { log.log(`${tag}: skip (PR already open)`); return; }
 
   const num = await createPull(repo, branch, base, branch, `Automated PR for branch \`${branch}\`.`, token, log);

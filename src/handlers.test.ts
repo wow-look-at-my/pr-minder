@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile } from './handlers';
+import { conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, maybeOpenPrForBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile } from './handlers';
 import { Logger } from './logger';
 import { resetConfigCache, type PrMinderConfig } from './config';
 
@@ -179,6 +179,62 @@ describe('detectForkBase', () => {
     const tips = new Map([['work1', ['claude/x']], ['ptip', ['claude/parent']], ['vtip', ['2.1.81']]]);
     const r = await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger());
     expect(r).toEqual({ base: '2.1.81', ahead: 2 });
+  });
+});
+
+describe('maybeOpenPrForBranch', () => {
+  // Route fetch by URL substring. Order matters: `/pulls?` (the open-PR check, a GET with a query)
+  // must precede `/pulls` (createPull, a POST with no query), because find() returns the first match.
+  function stubFetch(routes: Array<{ match: string; status: number; body?: unknown }>) {
+    const fn = vi.fn(async (url: string, _init?: any) => {
+      const route = routes.find((r) => url.includes(r.match));
+      if (!route) throw new Error(`unexpected fetch to ${url}`);
+      const text = JSON.stringify(route.body ?? {});
+      return { ok: route.status >= 200 && route.status < 300, status: route.status, text: async () => text, json: async () => JSON.parse(text) };
+    });
+    vi.stubGlobal('fetch', fn);
+    return fn;
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  // auto_open_pr enabled, no fork-point: the path is compareCommits -> hasOpenPrForBranch -> createPull.
+  const config = (): PrMinderConfig => ({
+    triggers: [], labels: {}, autoTriggerWorkflows: false,
+    autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [] },
+    autoDescribePr: { enabled: false, model: '' },
+  });
+
+  const createdPr = (fetchMock: ReturnType<typeof stubFetch>) =>
+    fetchMock.mock.calls.some(([u, init]) => typeof u === 'string' && u.endsWith('/pulls') && init?.method === 'POST');
+
+  it('opens a PR when the branch is ahead with a non-empty diff', async () => {
+    const fetchMock = stubFetch([
+      { match: '/compare/', status: 200, body: { ahead_by: 1, behind_by: 0, files: [{ filename: 'doc.md' }] } },
+      { match: '/pulls?', status: 200, body: [] },          // hasOpenPrForBranch: none open
+      { match: '/pulls', status: 200, body: { number: 42 } }, // createPull
+    ]);
+    await maybeOpenPrForBranch('o/r', 'claude/x', 'main', config(), 'tok', new Logger());
+    expect(createdPr(fetchMock)).toBe(true);
+  });
+
+  it('does NOT open a content-empty PR (ahead by commits, zero changed files)', async () => {
+    // The #224/#225/#226 case: branch ahead by 27 merge/squash-orphaned commits, but the net diff
+    // is empty because the content is already in base. Must bail before the open-PR check or create.
+    const fetchMock = stubFetch([
+      { match: '/compare/', status: 200, body: { ahead_by: 27, behind_by: 0, files: [] } },
+    ]);
+    await maybeOpenPrForBranch('o/r', 'claude/youthful-archimedes-s78n2q', 'main', config(), 'tok', new Logger());
+    expect(fetchMock.mock.calls.some(([u]) => typeof u === 'string' && u.includes('/pulls'))).toBe(false);
+  });
+
+  it('still opens when GitHub omits the files array (changed_files unknown -> fail open)', async () => {
+    const fetchMock = stubFetch([
+      { match: '/compare/', status: 200, body: { ahead_by: 5, behind_by: 0 } }, // no files field
+      { match: '/pulls?', status: 200, body: [] },
+      { match: '/pulls', status: 200, body: { number: 7 } },
+    ]);
+    await maybeOpenPrForBranch('o/r', 'claude/x', 'main', config(), 'tok', new Logger());
+    expect(createdPr(fetchMock)).toBe(true);
   });
 });
 
