@@ -301,11 +301,24 @@ describe('searchPrsByLabel', () => {
 });
 
 describe('compareCommits', () => {
-  it('compares base...head and returns ahead_by/behind_by', async () => {
-    const fetchMock = stubFetch(200, { ahead_by: 2, behind_by: 5 });
+  it('compares base...head and returns ahead_by/behind_by + changed_files', async () => {
+    const fetchMock = stubFetch(200, { ahead_by: 2, behind_by: 5, files: [{ filename: 'a' }, { filename: 'b' }] });
     const cmp = await compareCommits('o/r', 'main', 'feature/x', 'tok', new Logger());
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/compare/main...feature/x');
-    expect(cmp).toEqual({ ahead_by: 2, behind_by: 5 });
+    expect(cmp).toEqual({ ahead_by: 2, behind_by: 5, changed_files: 2 });
+  });
+
+  it('reports changed_files: 0 for an empty net diff (ahead by commits, no file changes)', async () => {
+    // The squash-merge case: the branch is ahead by commit count but its content is already in base.
+    stubFetch(200, { ahead_by: 27, behind_by: 0, files: [] });
+    const cmp = await compareCommits('o/r', 'main', 'claude/x', 'tok', new Logger());
+    expect(cmp).toEqual({ ahead_by: 27, behind_by: 0, changed_files: 0 });
+  });
+
+  it('reports changed_files: null when GitHub omits the files array (fail open)', async () => {
+    stubFetch(200, { ahead_by: 3, behind_by: 0 });
+    const cmp = await compareCommits('o/r', 'main', 'feature/x', 'tok', new Logger());
+    expect(cmp).toEqual({ ahead_by: 3, behind_by: 0, changed_files: null });
   });
 
   it('returns null on error', async () => {

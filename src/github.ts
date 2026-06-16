@@ -145,13 +145,21 @@ export async function commitAgeSeconds(repo: string, sha: string, token: string,
   return Math.max(0, Math.floor((Date.now() - ms) / 1000));
 }
 
-// `${base}...${head}` commit comparison. Returns null on error (caller skips). Branch names
-// keep their slashes in the path; git ref rules forbid the characters that would need encoding.
-export async function compareCommits(repo: string, base: string, head: string, token: string, log: Logger): Promise<{ ahead_by: number; behind_by: number } | null> {
+// `${base}...${head}` commit comparison (three-dot: changes on head since it diverged from base —
+// the same net diff GitHub shows for a PR). Returns ahead_by/behind_by plus changed_files, the
+// number of files in that net diff. changed_files is null when GitHub omits the `files` array (an
+// oversized/pathological response) so a caller can fail open — "unknown" must never be mistaken for
+// "empty". Returns null on error (caller skips). Branch names keep their slashes in the path; git
+// ref rules forbid the characters that would need encoding.
+export async function compareCommits(repo: string, base: string, head: string, token: string, log: Logger): Promise<{ ahead_by: number; behind_by: number; changed_files: number | null } | null> {
   const r = await gh(`/repos/${repo}/compare/${base}...${head}`, token, log);
   if (!r.ok) return null;
   const data: any = await r.json();
-  return { ahead_by: data.ahead_by ?? 0, behind_by: data.behind_by ?? 0 };
+  return {
+    ahead_by: data.ahead_by ?? 0,
+    behind_by: data.behind_by ?? 0,
+    changed_files: Array.isArray(data.files) ? data.files.length : null,
+  };
 }
 
 export async function hasOpenPrForBranch(repo: string, branch: string, token: string, log: Logger): Promise<boolean> {
