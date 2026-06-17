@@ -1,6 +1,6 @@
 # pr-minder
 
-> pr-minder is a GitHub App (running as a Cloudflare Worker) that keeps pull requests healthy with zero per-repo workflow files. It keeps PR branches up to date with their base, syncs labels with GitHub's native auto-merge, revives "zombie" PRs whose CI never ran, opens PRs for forgotten branches, and can write PR titles and descriptions from the diff with an AI model. It is opt-in and event-driven, with one lightweight periodic safety sweep that only re-checks PRs it has explicitly flagged (no work, and no GitHub calls, when nothing is pending). It keeps a little dedup state (which PRs it has already checked) in Workers KV.
+> pr-minder is a GitHub App (running as a Cloudflare Worker) that keeps pull requests healthy with zero per-repo workflow files. It keeps PR branches up to date with their base, syncs labels with GitHub's native auto-merge, flags PRs that have merge conflicts with a label, revives "zombie" PRs whose CI never ran, opens PRs for forgotten branches, and can write PR titles and descriptions from the diff with an AI model. It is opt-in and event-driven, with a lightweight periodic sweep that re-checks only the PRs it has explicitly flagged — deferred zombie re-checks and pending merge-conflict re-checks — plus an auto-merge backstop (no work, and no GitHub calls, when nothing is pending). It keeps a little dedup state (which PRs it has already checked) in Workers KV.
 
 ## Install
 
@@ -66,7 +66,7 @@ A map of label name to per-label settings:
 | `auto_add` | `"on_pr_creation"` applies the label when a PR is opened; `false` (default) disables. |
 | `create_label_if_missing_in_repo` | `true` creates the label in the repo (using `color`) if it doesn't exist. |
 | `color` | 6-digit hex, with or without a leading `#` (default `00FF00`). |
-| `mode` | `"auto_update"`: keep the PR branch in sync with base whenever this label is present. `"auto_merge"`: bidirectionally sync this label with GitHub's native auto-merge. |
+| `mode` | `"auto_update"`: keep the PR branch in sync with base whenever this label is present. `"auto_merge"`: bidirectionally sync this label with GitHub's native auto-merge. `"merge_conflict"`: pr-minder adds this label when the PR has a merge conflict and removes it when the conflict is resolved (see below). |
 | `auto_merge_method` | `"merge"`, `"squash"` (default), or `"rebase"`. Only used with `mode: "auto_merge"`. |
 
 With `mode: "auto_merge"`, adding the label arms GitHub's native auto-merge and removing it disarms it; toggling auto-merge from the GitHub UI adds/removes the label to match. Whenever GitHub won't arm native auto-merge, pr-minder merges the PR directly using `auto_merge_method` — this covers both an already-mergeable PR (GitHub refuses auto-merge on a "clean" PR) and a repo that hasn't enabled "Allow auto-merge" in its settings, so the label still merges your PRs there. Branch protection still gates every merge, and a PR that isn't mergeable yet is left untouched. (For the "wait for checks, then merge" behavior in a repo without native auto-merge, enable "Allow auto-merge" in the repo's Settings; pr-minder uses native auto-merge whenever the repo allows it.)
@@ -81,6 +81,22 @@ Day to day this is driven by the `labeled` webhook, so it acts the moment you ad
   }
 }
 ```
+
+### merge_conflict label — flag PRs that have conflicts
+
+A label with `mode: "merge_conflict"` is managed entirely by pr-minder: it **adds the label when a PR has a merge conflict** with its base and **removes it once the conflict is resolved**. Don't add or remove the label by hand. Opt-in — there is no such label unless you configure one.
+
+```jsonc
+{
+  "auto_label_pr": {
+    "merge-conflict": { "mode": "merge_conflict", "create_label_if_missing_in_repo": true, "color": "d73a4a" }
+  }
+}
+```
+
+A PR can become conflicted when its own head changes or when its base advances, and both are covered: the PR's `opened` / `reopened` / `synchronize` events re-check it immediately, and a push to the default branch flags every open PR for a re-check (any of them may now conflict). On install — and the first time pr-minder sees an already-installed repo — it flags the existing open PRs too.
+
+GitHub computes mergeability **asynchronously** and emits no webhook with the result, so right after a base/head move it briefly reports "unknown". pr-minder handles this by flagging the PR and settling the label from the periodic sweep once the answer is ready (usually within a few minutes) — so the label can lag a base change slightly but always converges. Mergeability reflects **conflicts only** (not failing checks or missing reviews), so the label means exactly "this needs a rebase/merge". Draft PRs are not labeled.
 
 ### auto_trigger_workflows — revive "zombie" PRs
 

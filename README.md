@@ -127,6 +127,35 @@ Day to day, this is driven by the `labeled` webhook — adding the label acts im
 
 > **Tip:** In a repo where you have *not* enabled "Allow auto-merge", labeling a PR whose required checks are still running won't merge it later on its own — the worker doesn't listen for check-completion events. Enable "Allow auto-merge" in **Settings → Pull Requests** for that wait-for-checks behavior; the worker uses native auto-merge whenever the repo allows it.
 
+## Flagging merge conflicts
+
+Give a label `mode: "merge_conflict"` in `auto_label_pr` and pr-minder keeps that label in sync with the PR's mergeability: it **adds the label when the PR has a merge conflict** with its base, and **removes it once the conflict is resolved**. The label is fully managed by pr-minder — don't add or remove it by hand.
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
+  "auto_label_pr": {
+    "merge-conflict": {
+      "mode": "merge_conflict",
+      "create_label_if_missing_in_repo": true,
+      "color": "d73a4a"
+    }
+  }
+}
+```
+
+A PR can become conflicted two ways, and both are covered:
+
+- **Its own head changes** (`opened` / `reopened` / `synchronize`) — re-checked immediately on the event.
+- **Its base advances** (someone merges another PR to the default branch) — every open PR is flagged for a re-check, since any of them may now conflict.
+
+GitHub computes mergeability **asynchronously** and sends no webhook with the result, so a fresh push usually reports "unknown" for a moment. pr-minder handles this by flagging the PR and settling the label from a small periodic sweep once GitHub has the answer (typically within a few minutes) — so the label may lag a base change slightly, but it always converges. On install (and the first time it sees an already-installed repo) it flags the existing open PRs too, so they get labeled without waiting for an event.
+
+Notes:
+- **Opt-in**, off by default — there is no `merge_conflict` label unless you configure one.
+- Set `create_label_if_missing_in_repo: true` (with a `color`) to have pr-minder create the label in the repo; otherwise create it yourself.
+- Mergeability reflects **conflicts only**, not failing checks or missing reviews — so the label means "this needs a rebase/merge", nothing else. Draft PRs are not labeled.
+
 ## Re-triggering CI for bot-created PRs
 
 When a GitHub Actions workflow opens a pull request using the default `GITHUB_TOKEN`, GitHub [deliberately suppresses the PR's own workflows](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow#triggering-a-workflow-from-a-workflow) — "events triggered by the `GITHUB_TOKEN` will not create a new workflow run" — to prevent recursive runs. The result is a **"zombie" PR**: it's open, but none of its required `pull_request` checks ever ran, so it can never go green or merge.

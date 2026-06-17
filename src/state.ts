@@ -1,7 +1,11 @@
-// Workers KV state for the zombie check. Six kinds of key:
+// Workers KV state for the zombie check. Seven kinds of key:
 //   pr:{repo}#{num}        -> the head SHA we last evaluated that PR at
 //   backfill:{repo}        -> set once we've swept a repo's pre-existing PRs
 //   recheck:{repo}#{num}   -> a self-set "re-check this PR later" reminder (see setRecheck)
+//   conflict:{repo}#{num}  -> a self-set "re-check this PR's mergeability later" reminder, drained
+//                             by the cron's runConflictChecks (see setConflictCheck) — GitHub
+//                             computes mergeability asynchronously, so a base/head change is flagged
+//                             here and the label settled once the answer is ready
 //   swept:{owner}          -> a short-lived per-owner cooldown for the auto-merge backstop, so it
 //                             doesn't re-search on every webhook (see markSwept/recentlySwept)
 //   desc:{repo}#{num}      -> SHA-256 of the PR diff the auto_describe_pr metadata was last
@@ -20,6 +24,9 @@ const backfillKey = (repo: string) => `backfill:${repo}`;
 const RECHECK_PREFIX = 'recheck:';
 const recheckKey = (repo: string, num: number) => `${RECHECK_PREFIX}${repo}#${num}`;
 const RECHECK_TTL_S = 86400; // a reminder self-expires after a day if a sweep never clears it
+const CONFLICT_PREFIX = 'conflict:';
+const conflictKey = (repo: string, num: number) => `${CONFLICT_PREFIX}${repo}#${num}`;
+const CONFLICT_TTL_S = 86400; // same safety net as recheck: a stale reminder can't linger past a day
 const sweptKey = (owner: string) => `swept:${owner}`;
 
 export async function checkedSha(kv: KVNamespace, repo: string, num: number): Promise<string | null> {
@@ -55,12 +62,20 @@ export async function clearRecheck(kv: KVNamespace, repo: string, num: number): 
 // sweep mints its own token per repo. Returns [] if there are none, so an empty sweep costs a
 // single KV list and zero GitHub API calls.
 export async function listRechecks(kv: KVNamespace): Promise<Array<{ repo: string; num: number }>> {
+  return listReminders(kv, RECHECK_PREFIX);
+}
+
+// Shared list-and-parse for the per-PR reminder kinds (recheck:, conflict:). Each key is
+// "{prefix}{owner}/{name}#{num}"; the key alone carries everything the sweep needs (it mints its own
+// token per repo), so values are never read. Returns [] when none, so an empty sweep is a single KV
+// list and zero GitHub calls.
+async function listReminders(kv: KVNamespace, prefix: string): Promise<Array<{ repo: string; num: number }>> {
   const out: Array<{ repo: string; num: number }> = [];
   let cursor: string | undefined;
   for (;;) {
-    const res = await kv.list({ prefix: RECHECK_PREFIX, cursor });
+    const res = await kv.list({ prefix, cursor });
     for (const k of res.keys) {
-      const body = k.name.slice(RECHECK_PREFIX.length); // "{owner}/{name}#{num}"
+      const body = k.name.slice(prefix.length); // "{owner}/{name}#{num}"
       const hash = body.lastIndexOf('#');
       if (hash < 0) continue;
       const repo = body.slice(0, hash);
@@ -71,6 +86,23 @@ export async function listRechecks(kv: KVNamespace): Promise<Array<{ repo: strin
     cursor = res.cursor;
   }
   return out;
+}
+
+// A "re-check this PR's mergeability later" reminder, the merge_conflict-label analogue of setRecheck.
+// GitHub computes a PR's mergeability asynchronously, and no webhook carries the result — so when a
+// base or head move may have changed it, pr-minder flags the PR here and the cron (runConflictChecks)
+// settles the label once the answer is ready. Keyed per PR so a later flag just overwrites it; the
+// TTL bounds a reminder for a PR that's since gone away.
+export async function setConflictCheck(kv: KVNamespace, repo: string, num: number): Promise<void> {
+  await kv.put(conflictKey(repo, num), new Date().toISOString(), { expirationTtl: CONFLICT_TTL_S });
+}
+
+export async function clearConflictCheck(kv: KVNamespace, repo: string, num: number): Promise<void> {
+  await kv.delete(conflictKey(repo, num));
+}
+
+export async function listConflictChecks(kv: KVNamespace): Promise<Array<{ repo: string; num: number }>> {
+  return listReminders(kv, CONFLICT_PREFIX);
 }
 
 // The diff fingerprint auto_describe_pr last generated metadata from, keyed per PR. A

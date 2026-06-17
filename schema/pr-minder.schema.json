@@ -140,8 +140,8 @@
           "default": "00FF00"
         },
         "mode": {
-          "description": "'auto_update': PR branch is kept in sync with its base whenever this label is present (complementary to auto_update_pr.triggers). 'auto_merge': adding/removing this label enables/disables GitHub's native auto-merge; toggling auto-merge via the GitHub UI adds/removes the label.",
-          "enum": ["auto_update", "auto_merge"]
+          "description": "'auto_update': PR branch is kept in sync with its base whenever this label is present (complementary to auto_update_pr.triggers). 'auto_merge': adding/removing this label enables/disables GitHub's native auto-merge; toggling auto-merge via the GitHub UI adds/removes the label. 'merge_conflict': pr-minder applies this label to a PR when it has a merge conflict with its base, and removes it once the conflict is resolved (managed entirely by pr-minder; do not add or remove it by hand).",
+          "enum": ["auto_update", "auto_merge", "merge_conflict"]
         },
         "auto_merge_method": {
           "description": "Merge method to use when enabling auto-merge. Only relevant when mode is 'auto_merge'.",
