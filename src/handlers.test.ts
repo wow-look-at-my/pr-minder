@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, maybeOpenPrForBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile, closeEmptyAutoPrs } from './handlers';
+import { conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, maybeOpenPrForBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile, conflictLabelNames, closeEmptyAutoPrs } from './handlers';
 import { resetAppBotLoginCache } from './github';
 import { Logger } from './logger';
 import { resetConfigCache, type PrMinderConfig } from './config';
@@ -88,6 +88,27 @@ describe('isActionsBotPr', () => {
   it('is false when the author is missing', () => {
     expect(isActionsBotPr({})).toBe(false);
     expect(isActionsBotPr(undefined)).toBe(false);
+  });
+});
+
+describe('conflictLabelNames', () => {
+  const baseCfg = (labels: PrMinderConfig['labels']): PrMinderConfig =>
+    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true }, autoDescribePr: { enabled: false, model: '' } });
+  const opts = (mode?: 'auto_merge' | 'auto_update' | 'merge_conflict') =>
+    ({ auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode, auto_merge_method: 'squash' as const });
+
+  it('returns only the merge_conflict-mode label names', () => {
+    const cfg = baseCfg({ conflict: opts('merge_conflict'), ship: opts('auto_merge'), fresh: opts('auto_update'), plain: opts() });
+    expect(conflictLabelNames(cfg)).toEqual(['conflict']);
+  });
+
+  it('returns every merge_conflict label when more than one is configured', () => {
+    const cfg = baseCfg({ conflict: opts('merge_conflict'), 'needs-rebase': opts('merge_conflict') });
+    expect(conflictLabelNames(cfg).sort()).toEqual(['conflict', 'needs-rebase']);
+  });
+
+  it('is empty when no label uses merge_conflict mode (feature off)', () => {
+    expect(conflictLabelNames(baseCfg({ ship: opts('auto_merge') }))).toEqual([]);
   });
 });
 

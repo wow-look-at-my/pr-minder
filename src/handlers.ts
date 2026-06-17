@@ -1,7 +1,7 @@
 import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
 import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, appBotLogin, closePull, commentOnPr, gh } from './github';
-import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, markSwept, recentlySwept } from './state';
+import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, markSwept, recentlySwept } from './state';
 import { describeSafely, shouldDescribe } from './describe';
 import type { Logger } from './logger';
 
@@ -267,6 +267,14 @@ async function onPR(p: any, env: Env, log: Logger, defer?: Defer): Promise<void>
     if (await reviveIfZombie(env, repo, pr, token, log)) return;
   }
 
+  // Apply/remove the merge_conflict label. A PR's head just changed (opened/reopened/synchronize),
+  // so its mergeability may have changed too. The webhook payload's `mergeable` is unreliable
+  // (GitHub computes it asynchronously), so evaluateMergeConflict re-reads it and either acts now or
+  // defers to the cron once GitHub has the answer.
+  if (['opened', 'reopened', 'synchronize'].includes(action) && conflictLabelNames(config).length > 0) {
+    await evaluateMergeConflict(env, repo, pr.number, config, token, log);
+  }
+
   // Sync label ↔ GitHub native auto-merge (bidirectional).
   // label added   → enable auto-merge; label removed  → disable auto-merge.
   // auto_merge_enabled event → add label; auto_merge_disabled event → remove label.
@@ -343,6 +351,14 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
     } catch (e) {
       log.log(`${tag}: updateBranch failed: ${(e as Error).message}`);
     }
+  }
+
+  // The base just moved, so any open PR that merged cleanly before may now conflict (or vice-versa).
+  // Flag each for a merge-conflict re-check — a cheap KV put, no GitHub call — and let the cron settle
+  // the label once GitHub has recomputed mergeability (a base move leaves the payload's `mergeable`
+  // stale/null, so we can't read it here). Gated so it's free for repos without a merge_conflict label.
+  if (conflictLabelNames(config).length > 0) {
+    await enqueueConflictChecks(env, prs, repo, log);
   }
 
   // The default branch just advanced, so an auto-opened PR whose content landed in it (e.g. via a
@@ -580,11 +596,7 @@ export async function runRechecks(env: Env, log: Logger): Promise<void> {
   const tokenByRepo = new Map<string, string | null>();
   for (const { repo, num } of pending) {
     try {
-      if (!tokenByRepo.has(repo)) {
-        const instId = await repoInstallationId(repo, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
-        tokenByRepo.set(repo, instId === null ? null : await installToken(instId, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log));
-      }
-      const token = tokenByRepo.get(repo) ?? null;
+      const token = await tokenForRepo(repo, tokenByRepo, env, log);
       if (!token) continue; // no token (repo uninstalled, or a transient error) — leave it; the TTL bounds it
       const pr = await getPull(repo, num, token, log);
       if (!pr) continue; // transient fetch failure — leave the reminder for the next sweep
@@ -594,6 +606,150 @@ export async function runRechecks(env: Env, log: Logger): Promise<void> {
       await reviveIfZombie(env, repo, pr, token, log);
     } catch (e) {
       log.log(`recheck ${repo}#${num}: ${(e as Error).message}`);
+    }
+  }
+}
+
+// Mint (and cache per repo) an installation token for a repo, for the KV-reminder sweeps that know
+// only the repo name (runRechecks, runConflictChecks). Returns null when the repo has no installation
+// (uninstalled) or on a transient error, so the caller leaves the reminder for a later sweep. The
+// cache also distinguishes "not yet looked up" (absent) from "looked up, no token" (present null).
+async function tokenForRepo(repo: string, cache: Map<string, string | null>, env: Env, log: Logger): Promise<string | null> {
+  if (!cache.has(repo)) {
+    const instId = await repoInstallationId(repo, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+    cache.set(repo, instId === null ? null : await installToken(instId, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log));
+  }
+  return cache.get(repo) ?? null;
+}
+
+// ----- merge_conflict label: flag a PR when it has a merge conflict, clear the flag when it merges
+// cleanly. GitHub computes mergeability asynchronously and emits no webhook with the result, so the
+// flow is: a base/head move enqueues a check (KV reminder), and the answer is read (and the label
+// applied) once GitHub has it — live on the PR's own events, and via the cron everywhere else. -----
+
+// Names of all labels configured with mode "merge_conflict". Empty (the common case) means the
+// feature is off for this repo, so every entry point gates on this being non-empty and costs nothing.
+export function conflictLabelNames(config: PrMinderConfig): string[] {
+  return Object.entries(config.labels).filter(([, o]) => o.mode === 'merge_conflict').map(([name]) => name);
+}
+
+// A PR's conflict state from GitHub's `mergeable`: true = no conflict (so remove the label), false =
+// conflict (add the label), null/undefined = GitHub hasn't computed it yet (the read itself starts
+// the background job) — caller defers. Mergeability reflects conflicts only, not required checks or
+// reviews (those live in mergeable_state), so `mergeable === false` is exactly a merge conflict.
+function conflictState(pr: any): boolean | null {
+  if (pr?.mergeable === true) return false;
+  if (pr?.mergeable === false) return true;
+  return null;
+}
+
+// Add or remove the merge_conflict-mode label(s) to match the PR's current conflict state. Idempotent:
+// only adds a missing label / removes a present one, so re-running on an already-correct PR is a no-op.
+async function applyConflictLabels(repo: string, pr: any, names: string[], conflict: boolean, token: string, log: Logger): Promise<void> {
+  const tag = `${repo}#${pr.number}`;
+  const have = new Set<string>((pr.labels ?? []).map((l: any) => l.name));
+  for (const name of names) {
+    if (conflict && !have.has(name)) {
+      log.log(`${tag}: addLabel "${name}" (merge conflict)`);
+      await addLabelsToPr(repo, pr.number, [name], token, log);
+    } else if (!conflict && have.has(name)) {
+      log.log(`${tag}: removeLabel "${name}" (conflict resolved)`);
+      await removeLabelFromPr(repo, pr.number, name, token, log);
+    }
+  }
+}
+
+// Evaluate one PR's merge-conflict label now, from a fresh read (the webhook payload's `mergeable` is
+// unreliable). Used on the PR's own events. If GitHub has computed mergeability we apply the label and
+// clear any pending reminder; if not (null), or the read failed transiently, we leave a conflict:
+// reminder for the cron to settle once the answer is ready; a closed/draft PR just clears the reminder.
+export async function evaluateMergeConflict(env: Env, repo: string, num: number, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+  const names = conflictLabelNames(config);
+  if (names.length === 0) return;
+  const pr = await getPull(repo, num, token, log);
+  if (!pr) { // transient fetch failure — defer to the cron
+    if (env.PR_STATE) await setConflictCheck(env.PR_STATE, repo, num);
+    return;
+  }
+  if (pr.state !== 'open' || pr.draft) { // not applicable — drop any pending reminder
+    if (env.PR_STATE) await clearConflictCheck(env.PR_STATE, repo, num);
+    return;
+  }
+  const conflict = conflictState(pr);
+  if (conflict === null) { // GitHub hasn't computed mergeability yet — defer to the cron
+    if (env.PR_STATE) await setConflictCheck(env.PR_STATE, repo, num);
+    return;
+  }
+  await applyConflictLabels(repo, pr, names, conflict, token, log);
+  if (env.PR_STATE) await clearConflictCheck(env.PR_STATE, repo, num);
+}
+
+// Flag every open, non-draft PR in `prs` for a merge-conflict re-check (a KV put each, no GitHub
+// call). Used when something moved a base under many PRs at once (a default-branch push, the
+// first-install backfill): the cron then settles each label once GitHub has recomputed mergeability.
+async function enqueueConflictChecks(env: Env, prs: any[], repo: string, log: Logger): Promise<void> {
+  if (!env.PR_STATE) return;
+  let n = 0;
+  for (const pr of prs) {
+    if (pr.draft) continue;
+    await setConflictCheck(env.PR_STATE, repo, pr.number);
+    n++;
+  }
+  if (n) log.log(`${repo}: enqueued ${n} merge-conflict check(s)`);
+}
+
+// Backfill/install entry: when a merge_conflict label is configured, list the repo's open PRs and
+// enqueue a check for each, so pre-existing PRs get their label set without waiting for an event.
+// Gated on the feature being on, so it makes no GitHub call (no PR listing) for repos that don't use it.
+async function enqueueConflictChecksForRepo(repo: string, config: PrMinderConfig, env: Env, token: string, log: Logger): Promise<void> {
+  if (!env.PR_STATE || conflictLabelNames(config).length === 0) return;
+  const prs = await listOpenPulls(repo, token, log);
+  await enqueueConflictChecks(env, prs, repo, log);
+}
+
+// Scheduled merge-conflict sweep (a cron pass alongside runRechecks). Drains the conflict: reminders
+// that base/head moves left behind, settling each PR's label once GitHub has computed mergeability.
+// Reads only the reminders — with none pending it's a single KV list and zero GitHub calls. Per
+// pending PR it mints a token for the repo (cached per run), loads that repo's config (cached per
+// run) for the label names, reads the PR, and applies/clears. A still-uncomputed or transiently
+// unreadable PR is left for the next sweep (TTL bounds it); a closed/draft/gone or feature-off PR has
+// its reminder cleared. `budget.calls` bounds the GitHub calls so the cron stays under the subrequest
+// cap; PRs not reached this tick are picked up on the next.
+export async function runConflictChecks(env: Env, log: Logger, budget: { calls: number }): Promise<void> {
+  if (!env.PR_STATE) return;
+  const pending = await listConflictChecks(env.PR_STATE);
+  if (pending.length === 0) return;
+  log.log(`conflict sweep: ${pending.length} pending PR(s)`);
+  const tokenByRepo = new Map<string, string | null>();
+  const namesByRepo = new Map<string, string[]>();
+  for (const { repo, num } of pending) {
+    // budget.calls counts every GitHub call so the pass stays under the subrequest cap — and, since it
+    // runs before reconcileAllInstalls in the same invocation, leaves that backstop room. Counts are
+    // conservative (e.g. a label op is charged even when the label's already correct): over-counting
+    // just processes a few fewer PRs this tick, never an overshoot. An exhausted budget stops here and
+    // the rest wait for the next tick.
+    if (budget.calls <= 0) { log.log(`conflict sweep: budget spent`); break; }
+    try {
+      if (!tokenByRepo.has(repo)) budget.calls -= 2; // repoInstallationId + installToken (first sight of repo)
+      const token = await tokenForRepo(repo, tokenByRepo, env, log);
+      if (!token) continue; // no token (uninstalled / transient) — leave it; the TTL bounds it
+      if (!namesByRepo.has(repo)) {
+        const [owner, name] = repo.split('/');
+        budget.calls--; // loadConfig (memoized per owner/repo, but count one to be safe)
+        namesByRepo.set(repo, conflictLabelNames(await loadConfig(owner, name, token, log)));
+      }
+      const names = namesByRepo.get(repo)!;
+      if (names.length === 0) { await clearConflictCheck(env.PR_STATE, repo, num); continue; } // feature off now
+      budget.calls -= 2; // getPull + a possible label op (charged unconditionally; safe over-count)
+      const pr = await getPull(repo, num, token, log);
+      if (!pr) continue; // transient — leave for the next sweep
+      if (pr.state !== 'open' || pr.draft) { await clearConflictCheck(env.PR_STATE, repo, num); continue; }
+      const conflict = conflictState(pr);
+      if (conflict === null) continue; // GitHub still hasn't computed it — leave for the next sweep
+      await applyConflictLabels(repo, pr, names, conflict, token, log);
+      await clearConflictCheck(env.PR_STATE, repo, num);
+    } catch (e) {
+      log.log(`conflict ${repo}#${num}: ${(e as Error).message}`);
     }
   }
 }
@@ -630,6 +786,7 @@ async function maybeBackfillRepo(fullName: string, installationId: number, env: 
     const config = await loadConfig(owner, name, token, log);
     await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
     await maybeOpenPrsForRepo(fullName, config, token, log);
+    await enqueueConflictChecksForRepo(fullName, config, env, token, log);
     await closeEmptyAutoPrs(fullName, config, token, env, log);
     await markBackfilled(env.PR_STATE, fullName);
   } catch (e) {
@@ -649,6 +806,7 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
       await reconcileAutoMerge(fullName, config, token, log);
       await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
       await maybeOpenPrsForRepo(fullName, config, token, log);
+      await enqueueConflictChecksForRepo(fullName, config, env, token, log);
       await closeEmptyAutoPrs(fullName, config, token, env, log);
       if (env.PR_STATE) await markBackfilled(env.PR_STATE, fullName);
       labelCheckedAt.set(fullName, Date.now());
@@ -670,6 +828,7 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
       await reconcileAutoMerge(repo.full_name, config, token, log);
       await maybeRetriggerZombiesForRepo(repo.full_name, config, token, env, log);
       await maybeOpenPrsForRepo(repo.full_name, config, token, log);
+      await enqueueConflictChecksForRepo(repo.full_name, config, env, token, log);
       await closeEmptyAutoPrs(repo.full_name, config, token, env, log);
       if (env.PR_STATE) await markBackfilled(env.PR_STATE, repo.full_name);
       labelCheckedAt.set(repo.full_name, Date.now());
