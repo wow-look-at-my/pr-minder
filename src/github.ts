@@ -420,6 +420,20 @@ export async function commentOnPr(repo: string, num: number, body: string, token
   log.log(`commentOnPr ${repo}#${num}: ${r.status} ${await r.text()}`);
 }
 
+// Set a PR's title and body (PATCH). Best-effort: it logs and swallows on failure, like
+// commentOnPr — relabeling a content-empty PR must never break the describe path that calls it.
+// Used by auto_describe_pr to give a 0-diff PR (which has no diff for the model to summarize) a
+// recognizable "[zero diff]" title instead of leaving it sitting with its branch name.
+export async function updatePullTitle(repo: string, num: number, title: string, body: string, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+    method: 'PATCH',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ title, body }),
+  });
+  if (r.ok) { log.log(`updatePullTitle ${repo}#${num}: "${title}"`); return; }
+  log.log(`updatePullTitle ${repo}#${num}: ${r.status} ${await r.text()}`);
+}
+
 // The full unified diff of a PR — the whole base...head diff, not one push — via the
 // `application/vnd.github.diff` media type on the PR endpoint. When GitHub refuses to render
 // that for a very large PR (the documented 406), fall back to reassembling the diff from the
