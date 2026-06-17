@@ -9,8 +9,12 @@
 import type { Env } from './worker';
 import type { Logger } from './logger';
 import type { PrMinderConfig } from './config';
-import { getPullDiff } from './github';
+import { getPullDiff, appBotLogin, updatePullTitle } from './github';
 import { describedDiffHash, markDescribed, describeRunId, markDescribeRun } from './state';
+
+// Title prefix stamped on a PR that has no net diff to describe. Exported so the test asserts the
+// exact marker rather than a copied literal.
+export const ZERO_DIFF_PREFIX = '[zero diff]';
 
 // The hand-off is a 202 from webhook-runner (it only spawns a container), so a short
 // timeout keeps a wedged runner from pinning the invocation.
@@ -61,7 +65,10 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
   // paginated files API when GitHub refuses to render the unified diff (406, very large).
   const diff = await getPullDiff(repo, pr.number, token, log);
   if (!diff || !diff.trim()) {
-    log.log(`${tag}: skip describe (no diff)`);
+    // A 0-diff PR has nothing for the model to summarize. Rather than skip silently — which leaves
+    // an auto-opened orphan sitting with its branch name as the title — give it a recognizable
+    // "[zero diff]" title. markZeroDiff is a no-op for anything that isn't our own bot's PR.
+    await markZeroDiff(env, repo, pr, token, log);
     return;
   }
 
@@ -128,6 +135,37 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
     if (typeof runId === 'string' && runId) await markDescribeRun(env.PR_STATE, repo, pr.number, runId);
     await markDescribed(env.PR_STATE, repo, pr.number, hash);
   }
+}
+
+// A PR with no net diff can't be described — there's nothing to summarize. Instead of skipping
+// silently (which leaves an auto-opened orphan stuck with its branch name as the title), stamp its
+// title "[zero diff] <branch>" so it's instantly recognizable in the PR list. Scoped to pr-minder's
+// OWN bot PRs (mirroring closeEmptyAutoPrs's safety rule — a human's, or another bot's, PR is never
+// relabeled), and idempotent (a title already starting with the marker isn't re-PATCHed, so repeated
+// synchronizes are no-ops). This is the on-event label; auto_open_pr.close_when_empty (on by default)
+// still closes these on the next base update, and a later non-empty diff re-describes via the webhook.
+async function markZeroDiff(env: Env, repo: string, pr: any, token: string, log: Logger): Promise<void> {
+  const tag = `${repo}#${pr.number}`;
+  const botLogin = await appBotLogin(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  if (!botLogin || pr.user?.login !== botLogin) {
+    log.log(`${tag}: skip describe (no diff)`); // not our bot's PR — leave its title untouched
+    return;
+  }
+  if (typeof pr.title === 'string' && pr.title.startsWith(ZERO_DIFF_PREFIX)) {
+    log.log(`${tag}: skip describe (no diff; already marked "${ZERO_DIFF_PREFIX}")`);
+    return;
+  }
+  const branch = pr.head?.ref ?? pr.title ?? '';
+  log.log(`${tag}: no diff — marking title "${ZERO_DIFF_PREFIX}"`);
+  await updatePullTitle(
+    repo,
+    pr.number,
+    `${ZERO_DIFF_PREFIX} ${branch}`.trim(),
+    'pr-minder: this PR has no net diff against its base, so there is nothing to describe or review. ' +
+      'It was auto-opened; `auto_open_pr.close_when_empty` (on by default) closes it on the next base update.',
+    token,
+    log,
+  );
 }
 
 // maybeDescribePr that never rejects: any error — missing var while enabled, key mismatch,

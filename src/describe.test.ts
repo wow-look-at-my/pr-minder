@@ -1,7 +1,21 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { maybeDescribePr, describeSafely, shouldDescribe } from './describe';
+import { maybeDescribePr, describeSafely, shouldDescribe, ZERO_DIFF_PREFIX } from './describe';
+import { resetAppBotLoginCache } from './github';
 import { Logger } from './logger';
 import type { PrMinderConfig } from './config';
+
+// A valid PKCS8 RSA private key in PEM form, so appBotLogin's appJWT actually imports (the 0-diff
+// rename path resolves the App's own bot login before relabeling). Mirrors handlers.test.ts.
+async function makePem(): Promise<string> {
+  const kp = (await crypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true,
+    ['sign', 'verify'],
+  )) as CryptoKeyPair;
+  const der = new Uint8Array((await crypto.subtle.exportKey('pkcs8', kp.privateKey)) as ArrayBuffer);
+  const b64 = btoa(String.fromCharCode(...der)).match(/.{1,64}/g)!.join('\n');
+  return `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`;
+}
 
 describe('shouldDescribe', () => {
   it('fires on opened, ready_for_review, and synchronize', () => {
@@ -50,11 +64,11 @@ describe('maybeDescribePr', () => {
   const makeEnv = (kv: any, over: Record<string, unknown> = {}): any =>
     ({ PR_STATE: kv, DESCRIBE_HOOK_URL: HOOK, DESCRIBE_HOOK_API_KEY: 'hook-key', PR_MINDER_PUBLIC_URL: 'https://pm.example', ...over });
   const cfg = (over: Partial<PrMinderConfig['autoDescribePr']> = {}): PrMinderConfig =>
-    ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [] }, autoDescribePr: { enabled: true, model: '', ...over } });
+    ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true }, autoDescribePr: { enabled: true, model: '', ...over } });
   const pr = { number: 7, title: 'claude/foo-123', body: 'old human notes' };
   const DIFF = 'diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n';
 
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); resetAppBotLoginCache(); });
 
   it('fetches the diff and hands it off to the hook with the old metadata and token', async () => {
     const { kv, store } = fakeKV();
@@ -147,11 +161,57 @@ describe('maybeDescribePr', () => {
     expect(fetchMock).not.toHaveBeenCalled(); // checked before any diff fetch or hand-off
   });
 
-  it('skips quietly when the diff is empty', async () => {
+  it('skips quietly when the diff is empty and the PR is not identifiable as our bot', async () => {
     const { kv } = fakeKV();
     const fetchMock = routeFetch([{ match: '/pulls/7', body: '' }]);
+    // No GITHUB_APP_ID/KEY -> appBotLogin can't resolve -> no relabel, no hook POST: just the diff GET.
     await maybeDescribePr(makeEnv(kv), 'o/r', pr, cfg(), 'tok', new Logger());
-    expect(fetchMock).toHaveBeenCalledTimes(1); // diff GET only — no hook POST
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks a 0-diff PR from our own bot with a [zero diff] title instead of skipping', async () => {
+    const { kv } = fakeKV();
+    const pem = await makePem();
+    const botPr = { number: 7, title: 'claude/foo-123', body: 'claude/foo-123', user: { login: 'pr-minder[bot]' }, head: { ref: 'claude/foo-123' } };
+    const fetchMock = routeFetch([
+      { match: 'api.github.com/app', body: { slug: 'pr-minder' } },
+      { match: '/repos/o/r/pulls/7', method: 'GET', body: '' }, // empty diff
+      { match: '/repos/o/r/pulls/7', method: 'PATCH', status: 200, body: {} },
+    ]);
+    await maybeDescribePr(makeEnv(kv, { GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: pem }), 'o/r', botPr, cfg(), 'tok', new Logger());
+
+    const patch = fetchMock.mock.calls.find(([, i]) => (i as any)?.method === 'PATCH');
+    expect(patch).toBeTruthy();
+    const sent = JSON.parse((patch![1] as any).body);
+    expect(sent.title).toBe(`${ZERO_DIFF_PREFIX} claude/foo-123`);
+    expect(sent.body).toContain('no net diff');
+    // An empty diff is never handed off to the describe hook.
+    expect(fetchMock.mock.calls.some(([u]) => (u as string) === HOOK)).toBe(false);
+  });
+
+  it('leaves a 0-diff PR from a non-bot author untouched (never relabels a human PR)', async () => {
+    const { kv } = fakeKV();
+    const pem = await makePem();
+    const humanPr = { number: 7, title: 'My real title', body: 'b', user: { login: 'octocat' }, head: { ref: 'feature' } };
+    const fetchMock = routeFetch([
+      { match: 'api.github.com/app', body: { slug: 'pr-minder' } },
+      { match: '/repos/o/r/pulls/7', method: 'GET', body: '' },
+    ]);
+    // A stray PATCH would throw "unexpected fetch" in routeFetch, so the absence of a reject also proves no relabel.
+    await maybeDescribePr(makeEnv(kv, { GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: pem }), 'o/r', humanPr, cfg(), 'tok', new Logger());
+    expect(fetchMock.mock.calls.some(([, i]) => (i as any)?.method === 'PATCH')).toBe(false);
+  });
+
+  it('does not re-mark a PR whose title is already the [zero diff] marker (idempotent)', async () => {
+    const { kv } = fakeKV();
+    const pem = await makePem();
+    const marked = { number: 7, title: `${ZERO_DIFF_PREFIX} claude/foo-123`, body: 'x', user: { login: 'pr-minder[bot]' }, head: { ref: 'claude/foo-123' } };
+    const fetchMock = routeFetch([
+      { match: 'api.github.com/app', body: { slug: 'pr-minder' } },
+      { match: '/repos/o/r/pulls/7', method: 'GET', body: '' },
+    ]);
+    await maybeDescribePr(makeEnv(kv, { GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: pem }), 'o/r', marked, cfg(), 'tok', new Logger());
+    expect(fetchMock.mock.calls.some(([, i]) => (i as any)?.method === 'PATCH')).toBe(false);
   });
 
   it('falls back to the files API when the unified diff is 406 (too large), then hands off the reassembled diff', async () => {
@@ -214,7 +274,7 @@ describe('describeSafely', () => {
   }
 
   const cfg = (): PrMinderConfig =>
-    ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [] }, autoDescribePr: { enabled: true, model: '' } });
+    ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true }, autoDescribePr: { enabled: true, model: '' } });
   const pr = { number: 7, title: 't', body: 'b' };
 
   afterEach(() => vi.unstubAllGlobals());

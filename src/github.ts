@@ -363,6 +363,77 @@ export async function getPull(repo: string, num: number, token: string, log: Log
   return r.json();
 }
 
+// The login of the App's own bot account — "<app-slug>[bot]" — used to recognize PRs pr-minder
+// itself opened (a GitHub App authors content as `{slug}[bot]`). Read once from GET /app (an
+// App-level endpoint, so JWT auth, not an installation token) and cached for the isolate's life.
+// Null on error, so a caller that needs to identify its own PRs skips rather than acts on an unknown.
+let cachedAppBotLogin: string | null = null;
+export async function appBotLogin(appId: string, privateKey: string, log: Logger): Promise<string | null> {
+  if (cachedAppBotLogin) return cachedAppBotLogin;
+  // Resolve-or-null: any failure (a bad key in appJWT, a /app fetch error, an unexpected body)
+  // returns null so the caller skips, and can never throw out of the push handler.
+  try {
+    const jwt = await appJWT(appId, privateKey);
+    const r = await fetch('https://api.github.com/app', {
+      headers: { authorization: `Bearer ${jwt}`, accept: 'application/vnd.github+json', 'user-agent': 'pr-minder' },
+    });
+    if (!r.ok) { log.log(`appBotLogin: ${r.status}`); return null; }
+    const data: any = await r.json();
+    if (typeof data.slug !== 'string') return null;
+    cachedAppBotLogin = `${data.slug}[bot]`;
+    return cachedAppBotLogin;
+  } catch (e) {
+    log.log(`appBotLogin: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+// Drop the cached App bot login. Tests only (the cache otherwise lives for the isolate); no
+// production caller, mirroring resetConfigCache.
+export function resetAppBotLoginCache(): void {
+  cachedAppBotLogin = null;
+}
+
+// Close a PR (PATCH state=closed). Throws on any non-2xx so the caller decides what to do; the
+// empty-PR sweep wraps each close in try/catch so one failure never aborts the rest.
+export async function closePull(repo: string, num: number, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+    method: 'PATCH',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ state: 'closed' }),
+  });
+  if (r.ok) { log.log(`closePull ${repo}#${num}`); return; }
+  const body = await r.text();
+  log.log(`closePull ${repo}#${num}: ${r.status} ${body}`);
+  throw new GhError(r.status, body);
+}
+
+// Post an issue comment on a PR (best-effort). A failure here must never block the action it
+// explains (e.g. closing an empty PR), so it logs and swallows rather than throwing.
+export async function commentOnPr(repo: string, num: number, body: string, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/comments`, {
+    method: 'POST',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ body }),
+  });
+  if (r.ok) { log.log(`commentOnPr ${repo}#${num}`); return; }
+  log.log(`commentOnPr ${repo}#${num}: ${r.status} ${await r.text()}`);
+}
+
+// Set a PR's title and body (PATCH). Best-effort: it logs and swallows on failure, like
+// commentOnPr — relabeling a content-empty PR must never break the describe path that calls it.
+// Used by auto_describe_pr to give a 0-diff PR (which has no diff for the model to summarize) a
+// recognizable "[zero diff]" title instead of leaving it sitting with its branch name.
+export async function updatePullTitle(repo: string, num: number, title: string, body: string, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+    method: 'PATCH',
+    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ title, body }),
+  });
+  if (r.ok) { log.log(`updatePullTitle ${repo}#${num}: "${title}"`); return; }
+  log.log(`updatePullTitle ${repo}#${num}: ${r.status} ${await r.text()}`);
+}
+
 // The full unified diff of a PR — the whole base...head diff, not one push — via the
 // `application/vnd.github.diff` media type on the PR endpoint. When GitHub refuses to render
 // that for a very large PR (the documented 406), fall back to reassembling the diff from the
