@@ -45,7 +45,7 @@ const conflictCfg = (names: string[] = ['conflict']): PrMinderConfig => ({
     names.map((n) => [n, { auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode: 'merge_conflict' as const, auto_merge_method: 'squash' as const }]),
   ),
   autoTriggerWorkflows: false,
-  autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [] },
+  autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true },
   autoDescribePr: { enabled: false, model: '' },
 });
 

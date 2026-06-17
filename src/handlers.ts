@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, appBotLogin, closePull, commentOnPr, gh } from './github';
 import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, markSwept, recentlySwept } from './state';
 import { describeSafely, shouldDescribe } from './describe';
 import type { Logger } from './logger';
@@ -360,6 +360,10 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   if (conflictLabelNames(config).length > 0) {
     await enqueueConflictChecks(env, prs, repo, log);
   }
+
+  // The default branch just advanced, so an auto-opened PR whose content landed in it (e.g. via a
+  // sibling squash-merge) is now content-empty — close those. No-op unless auto_open_pr is on.
+  await closeEmptyAutoPrs(repo, config, token, env, log);
 }
 
 // A push to a non-default branch: if auto_open_pr is on, open a PR for that branch when it's
@@ -487,6 +491,37 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
   log.log(`${repo}: auto_open_pr sweep over ${heads.length} branches`);
   for (const h of heads) {
     await maybeOpenPrForBranch(repo, h.name, base, config, token, log, tips);
+  }
+}
+
+// Close PRs pr-minder itself opened that have gone content-empty (zero net diff against base). The
+// open-time gate in maybeOpenPrForBranch stops pr-minder OPENING an empty PR, but a PR opened with a
+// real diff can become empty LATER — its content lands in base another way, e.g. a sibling branch
+// squash-merges the same change — and the open gate can't retract a PR that already exists. This is
+// the complementary cleanup. Safety: it only ever closes PRs authored by the App's OWN bot
+// (`{slug}[bot]`), so a human's (or another bot's) PR is never touched; and it closes only when
+// compareCommits reports EXACTLY zero changed files. A null/unknown count (GitHub omitted the files
+// array) is left alone — "unknown" must never be mistaken for "empty", the same rule the open gate
+// uses. Wired to run where the base can have just advanced (push to the default branch) and on the
+// install/backfill sweeps, mirroring where maybeOpenPrsForRepo runs.
+export async function closeEmptyAutoPrs(repo: string, config: PrMinderConfig, token: string, env: Env, log: Logger): Promise<void> {
+  if (!config.autoOpenPr.enabled || !config.autoOpenPr.closeWhenEmpty) return;
+  const botLogin = await appBotLogin(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  if (!botLogin) { log.log(`${repo}: skip empty-PR sweep (could not resolve the App bot login)`); return; }
+  const prs = await listOpenPulls(repo, token, log);
+  const ours = prs.filter((pr) => !pr.draft && pr.user?.login === botLogin && pr.head?.ref && pr.base?.ref);
+  if (ours.length === 0) return;
+  log.log(`${repo}: empty-PR sweep over ${ours.length} PR(s) authored by ${botLogin}`);
+  for (const pr of ours) {
+    try {
+      const cmp = await compareCommits(repo, pr.base.ref, pr.head.ref, token, log);
+      if (!cmp || cmp.changed_files !== 0) continue; // compare failed, or unknown/non-empty diff -> keep
+      log.log(`${repo}#${pr.number}: closing auto-opened PR with no net diff vs ${pr.base.ref}`);
+      await commentOnPr(repo, pr.number, `Auto-closing: this branch has no changes against \`${pr.base.ref}\` — its content is already in the base, so there is nothing to review. pr-minder opened this PR automatically.`, token, log);
+      await closePull(repo, pr.number, token, log);
+    } catch (e) {
+      log.log(`${repo}#${pr.number}: close-empty failed: ${(e as Error).message}`);
+    }
   }
 }
 
@@ -752,6 +787,7 @@ async function maybeBackfillRepo(fullName: string, installationId: number, env: 
     await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
     await maybeOpenPrsForRepo(fullName, config, token, log);
     await enqueueConflictChecksForRepo(fullName, config, env, token, log);
+    await closeEmptyAutoPrs(fullName, config, token, env, log);
     await markBackfilled(env.PR_STATE, fullName);
   } catch (e) {
     log.log(`maybeBackfill: ${fullName}: ${(e as Error).message}`);
@@ -771,6 +807,7 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
       await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
       await maybeOpenPrsForRepo(fullName, config, token, log);
       await enqueueConflictChecksForRepo(fullName, config, env, token, log);
+      await closeEmptyAutoPrs(fullName, config, token, env, log);
       if (env.PR_STATE) await markBackfilled(env.PR_STATE, fullName);
       labelCheckedAt.set(fullName, Date.now());
     } catch (e) {
@@ -792,6 +829,7 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
       await maybeRetriggerZombiesForRepo(repo.full_name, config, token, env, log);
       await maybeOpenPrsForRepo(repo.full_name, config, token, log);
       await enqueueConflictChecksForRepo(repo.full_name, config, env, token, log);
+      await closeEmptyAutoPrs(repo.full_name, config, token, env, log);
       if (env.PR_STATE) await markBackfilled(env.PR_STATE, repo.full_name);
       labelCheckedAt.set(repo.full_name, Date.now());
     } catch (e) {

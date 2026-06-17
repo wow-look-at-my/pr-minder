@@ -205,7 +205,8 @@ When a branch is ahead of its base and has no open PR, pr-minder opens one (`hea
 Notes:
 - **Opt-in**, off by default. The default branch and `gh-pages` are always skipped; add more via `skip_branches`.
 - The PR is opened by the App, so its author is the App's bot (not `github-actions[bot]`) and `auto_trigger_workflows` correctly leaves it alone — it isn't a zombie.
-- Branches with no commits ahead of base, or that already have an open PR, are skipped. Fork branches aren't opened (the head must be in this repo).
+- Branches with no commits ahead of base, or that already have an open PR, are skipped. A branch ahead only by squash-merged commits (no net diff) is skipped too — opening it would just create an empty PR. Fork branches aren't opened (the head must be in this repo).
+- **Empty PRs are cleaned up** (`close_when_empty`, default on). A PR opened with real changes can go content-empty later — its content lands in the base another way (a sibling branch squash-merges the same change) — and that can't be prevented at open time. pr-minder closes such PRs (with a one-line comment) once their net diff against the base is empty. It only ever closes PRs **it opened itself** (authored by the App's bot), never a human's, and only on an exact zero-file diff (an unknown count is left alone). Set `"close_when_empty": false` to opt out.
 - Needs only the `pull_requests: write` / `contents: read` the App already has.
 
 This replaces the "open PRs for branches missing one" job people often run as a GitHub Actions workflow — and fixes its core flaw (PRs opened with `GITHUB_TOKEN` never run their own CI).

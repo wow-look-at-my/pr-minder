@@ -47,6 +47,11 @@ export interface AutoOpenPr {
   // Which detected fork-point branches may be used as a base, as regex patterns. The repo's default
   // branch always qualifies; a non-default branch qualifies only if it matches one of these.
   baseBranchPatterns: string[];
+  // When true (default), close PRs pr-minder itself opened that have become content-empty — their
+  // net diff against the base is zero, e.g. after the branch's content landed in base via a squash
+  // merge (the open-time gate can't catch this, because the PR may go empty AFTER it was opened).
+  // Only ever closes PRs authored by pr-minder's own App bot, so it can never touch a human's PR.
+  closeWhenEmpty: boolean;
 }
 
 // AI-generated PR titles/descriptions from the full PR diff (src/describe.ts). The slow model
@@ -66,7 +71,7 @@ const CONFIG_PATH = '.github/config/pr-minder/pr-minder.jsonc';
 
 export const DEFAULT_LABEL_COLOR = '00FF00';
 
-const DISABLED: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [] }, autoDescribePr: { enabled: false, model: '' } };
+const DISABLED: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true }, autoDescribePr: { enabled: false, model: '' } };
 
 // Per-isolate config cache. loadConfig runs on essentially every webhook event (onPR,
 // onPushToDefault, onPushToBranch, the sweeps), and each resolution costs up to two GitHub
@@ -195,7 +200,7 @@ function defaultLabel(): LabelOptions {
 }
 
 export function mergeConfig(top: any, override: any): PrMinderConfig {
-  const result: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [] }, autoDescribePr: { enabled: false, model: '' } };
+  const result: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true }, autoDescribePr: { enabled: false, model: '' } };
   for (const src of [top, override]) {
     if (!src) continue;
     if (src.auto_update_pr && Array.isArray(src.auto_update_pr.triggers)) {
@@ -218,6 +223,7 @@ export function mergeConfig(top: any, override: any): PrMinderConfig {
       if (Array.isArray(a.base_branch_patterns)) {
         result.autoOpenPr.baseBranchPatterns = a.base_branch_patterns.filter((x: unknown) => typeof x === 'string');
       }
+      if (typeof a.close_when_empty === 'boolean') result.autoOpenPr.closeWhenEmpty = a.close_when_empty;
     }
     if (src.auto_describe_pr && typeof src.auto_describe_pr === 'object') {
       const d = src.auto_describe_pr;
