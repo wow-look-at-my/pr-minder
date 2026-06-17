@@ -266,6 +266,11 @@ describe('mergeConfig', () => {
       expect(cfg.labels['auto-pr-merge'].auto_merge_method).toBe('rebase');
     });
 
+    it('parses mode: merge_conflict', () => {
+      const cfg = mergeConfig({ auto_label_pr: { 'merge-conflict': { mode: 'merge_conflict' } } }, null);
+      expect(cfg.labels['merge-conflict'].mode).toBe('merge_conflict');
+    });
+
     it('ignores invalid mode values', () => {
       const cfg = mergeConfig({ auto_label_pr: { foo: { mode: 'invalid' } } }, null);
       expect(cfg.labels.foo.mode).toBeUndefined();
