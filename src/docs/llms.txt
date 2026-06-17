@@ -113,8 +113,11 @@ It will not loop: pr-minder's own reopen comes back as a `reopened` event sent b
 | `target_base` | Base branch for opened PRs (default: the repo's default branch). When `base_from_fork_point` is on, this is the fallback used when no fork point is detected. |
 | `base_from_fork_point` | Detect each branch's base from its **fork point** instead of always using `target_base` (default `false`). |
 | `base_branch_patterns` | When `base_from_fork_point` is on, which non-default branches may be selected as a base (regex patterns). The default branch always qualifies. |
+| `close_when_empty` | Close PRs pr-minder opened that have become **content-empty** — zero net diff against the base (default `true`). See below. |
 
 It runs on a push to a non-default branch (opening the PR as soon as the branch gets a commit) and sweeps existing branches once when the App is installed or repositories are added. Fork branches are not opened.
+
+**Closing content-empty PRs (`close_when_empty`, default on).** Opening a PR is gated on a non-empty diff, but a PR opened with real changes can go *empty later* — its content lands in the base another way (a sibling branch squash-merges the same change, or the branch's commit is squashed into the base), and pr-minder can't retract a PR that already exists. So it also **closes** such PRs: for each open PR **authored by pr-minder's own App account** (a human's PR is never touched), it closes — with a one-line comment — only when the net diff against the base is exactly zero (an unknown/omitted file count is left alone). This runs when the default branch advances (a push to it) and on the install/backfill sweeps. Set `close_when_empty: false` to opt out.
 
 **Fork-point base detection.** With `base_from_fork_point: true`, pr-minder picks the base by walking the branch's commits newest-first and taking the first ancestor that is the HEAD of another *qualifying* branch — the default branch, or one matching `base_branch_patterns`. This suits an archive/version-branch layout: an investigation branch forked from a long-lived version branch (whose tip never moves, so it *is* the fork point) is opened back into that version branch, while a branch forked off the default branch goes into the default branch. When no qualifying fork point is found it falls back to `target_base` (or the default branch).
 
