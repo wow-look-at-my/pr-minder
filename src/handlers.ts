@@ -498,26 +498,29 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
 // open-time gate in maybeOpenPrForBranch stops pr-minder OPENING an empty PR, but a PR opened with a
 // real diff can become empty LATER — its content lands in base another way, e.g. a sibling branch
 // squash-merges the same change — and the open gate can't retract a PR that already exists. This is
-// the complementary cleanup. Safety: it only ever closes PRs authored by the App's OWN bot
-// (`{slug}[bot]`), so a human's (or another bot's) PR is never touched; and it closes only when
-// compareCommits reports EXACTLY zero changed files. A null/unknown count (GitHub omitted the files
-// array) is left alone — "unknown" must never be mistaken for "empty", the same rule the open gate
-// uses. Wired to run where the base can have just advanced (push to the default branch) and on the
+// the complementary cleanup. Safety: it only closes PRs authored by the App's OWN bot
+// (`{slug}[bot]`) or by `github-actions[bot]` (the default-GITHUB_TOKEN auto-PRs that auto_open_pr
+// replaced — they strand the same squash-merge orphans), so a human's PR, or any other bot's, is
+// never touched; and it closes only when compareCommits reports EXACTLY zero changed files. A
+// null/unknown count (GitHub omitted the files array) is left alone — "unknown" must never be
+// mistaken for "empty", the same rule the open gate uses. Wired to run where the base can have just
+// advanced (push to the default branch) and on the
 // install/backfill sweeps, mirroring where maybeOpenPrsForRepo runs.
 export async function closeEmptyAutoPrs(repo: string, config: PrMinderConfig, token: string, env: Env, log: Logger): Promise<void> {
   if (!config.autoOpenPr.enabled || !config.autoOpenPr.closeWhenEmpty) return;
   const botLogin = await appBotLogin(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
   if (!botLogin) { log.log(`${repo}: skip empty-PR sweep (could not resolve the App bot login)`); return; }
   const prs = await listOpenPulls(repo, token, log);
-  const ours = prs.filter((pr) => !pr.draft && pr.user?.login === botLogin && pr.head?.ref && pr.base?.ref);
-  if (ours.length === 0) return;
-  log.log(`${repo}: empty-PR sweep over ${ours.length} PR(s) authored by ${botLogin}`);
-  for (const pr of ours) {
+  // Our own bot's PRs, plus github-actions[bot]'s — both auto-open the same squash-merge orphans.
+  const closeable = prs.filter((pr) => !pr.draft && (pr.user?.login === botLogin || isActionsBotPr(pr)) && pr.head?.ref && pr.base?.ref);
+  if (closeable.length === 0) return;
+  log.log(`${repo}: empty-PR sweep over ${closeable.length} candidate PR(s) (${botLogin} or github-actions[bot])`);
+  for (const pr of closeable) {
     try {
       const cmp = await compareCommits(repo, pr.base.ref, pr.head.ref, token, log);
       if (!cmp || cmp.changed_files !== 0) continue; // compare failed, or unknown/non-empty diff -> keep
       log.log(`${repo}#${pr.number}: closing auto-opened PR with no net diff vs ${pr.base.ref}`);
-      await commentOnPr(repo, pr.number, `Auto-closing: this branch has no changes against \`${pr.base.ref}\` — its content is already in the base, so there is nothing to review. pr-minder opened this PR automatically.`, token, log);
+      await commentOnPr(repo, pr.number, `Auto-closing: this branch has no changes against \`${pr.base.ref}\` — its content is already in the base, so there is nothing to review.`, token, log);
       await closePull(repo, pr.number, token, log);
     } catch (e) {
       log.log(`${repo}#${pr.number}: close-empty failed: ${(e as Error).message}`);

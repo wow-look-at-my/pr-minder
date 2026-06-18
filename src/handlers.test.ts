@@ -581,6 +581,18 @@ describe('closeEmptyAutoPrs', () => {
     expect(fn.mock.calls.some(([u]) => typeof u === 'string' && u.includes('/issues/243/comments'))).toBe(true);
   });
 
+  it('also closes a github-actions[bot] PR whose net diff is empty', async () => {
+    const fn = stubFetch([
+      { match: '/app', body: { slug: 'pr-minder' } },                                       // appBotLogin -> pr-minder[bot]
+      { match: '/pulls?', body: [ourPr(125, { user: { login: 'github-actions[bot]' } })] }, // a default-GITHUB_TOKEN auto-PR
+      { match: '/compare/', body: { ahead_by: 9, behind_by: 0, files: [] } },               // squash-merge orphan: empty net diff
+      { match: '/issues/125/comments', status: 201, body: { id: 1 } },                       // commentOnPr
+      { match: '/pulls/125', body: {} },                                                     // closePull (PATCH)
+    ]);
+    await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
+    expect(closed(fn, 125)).toBe(true);
+  });
+
   it('keeps an app-bot PR that still has changes', async () => {
     const fn = stubFetch([
       { match: '/app', body: { slug: 'pr-minder' } },
@@ -599,6 +611,16 @@ describe('closeEmptyAutoPrs', () => {
     await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
     expect(fn.mock.calls.some(([u]) => typeof u === 'string' && u.includes('/compare/'))).toBe(false);
     expect(closed(fn, 260)).toBe(false);
+  });
+
+  it('never touches another bot (e.g. dependabot[bot]), even when empty', async () => {
+    const fn = stubFetch([
+      { match: '/app', body: { slug: 'pr-minder' } },
+      { match: '/pulls?', body: [ourPr(280, { user: { login: 'dependabot[bot]' } })] },
+    ]);
+    await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
+    expect(fn.mock.calls.some(([u]) => typeof u === 'string' && u.includes('/compare/'))).toBe(false);
+    expect(closed(fn, 280)).toBe(false);
   });
 
   it('does not close when the changed-files count is unknown (compare omits files)', async () => {
