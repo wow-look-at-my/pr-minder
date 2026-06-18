@@ -2,11 +2,15 @@ name = "pr-minder"
 main = "src/worker.ts"
 compatibility_date = "2026-04-19"
 
-# Gzip the docs sources before bundling; the Worker imports the .gz blobs (Data ->
-# ArrayBuffer) and serves them pre-compressed. Runs locally (wrangler dev) and in
-# Cloudflare Workers Builds (which invokes wrangler), so nothing binary is committed.
+# Custom build step. wrangler runs this before bundling on `dev`, `deploy`, and in Cloudflare
+# Workers Builds — and a non-zero exit aborts the build/deploy. `npm run build` is
+# `npm run typecheck && npm run build:docs`, so a type error fails EVERY build path (there is no
+# way to build or deploy with type errors), and only then are the docs sources gzipped. The Worker
+# imports the .gz blobs (Data -> ArrayBuffer) and serves them pre-compressed; nothing binary is
+# committed. (esbuild — what wrangler bundles with — strips types without checking, so tsc is the
+# only thing standing between a type error and production; that's why it lives in the build command.)
 [build]
-command = "node scripts/build-docs.mjs"
+command = "npm run build"
 
 [[rules]]
 type = "Data"

@@ -245,7 +245,10 @@ Notes:
 ## Local development
 
 ```sh
-npm run dev        # wrangler dev (no real webhooks without a tunnel)
-npm test           # vitest
-npm run typecheck  # tsc --noEmit
+npm run dev        # wrangler dev — typechecks, then bundles (no real webhooks without a tunnel)
+npm test           # tsc --noEmit && vitest  (tests can't pass with a type error)
+npm run build      # tsc --noEmit && gzip the docs (the command wrangler runs on deploy)
+npm run typecheck  # tsc --noEmit (standalone)
 ```
+
+Typecheck is baked into both the `build` and `test` scripts, and into `wrangler.toml`'s `[build]` step, so it can't be bypassed: esbuild — what vitest and wrangler bundle with — strips types without checking them, so `tsc` is the only gate.

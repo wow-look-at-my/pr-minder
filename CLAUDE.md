@@ -29,13 +29,20 @@ wrangler.toml             Worker name, compat date, [build] gzip step, [[rules]]
 
 ## Build / typecheck
 
-Do NOT run `tsc` or `wrangler` directly. Use:
+`tsc --noEmit` (type-check only) is wired into **both** the build and the tests, so a type error
+can't slip through either path. This matters because esbuild — what vitest and wrangler bundle with —
+strips types **without checking them**, so `tsc` is the only thing standing between a type error and a
+green test run / a production deploy. Do NOT run `tsc` or `wrangler` directly. Use:
 ```sh
-npm run typecheck   # tsc --noEmit
-npm run dev         # wrangler dev
+npm run typecheck   # tsc --noEmit (standalone)
+npm test            # tsc --noEmit && vitest run     (tests can't pass with a type error)
+npm run build       # tsc --noEmit && npm run build:docs
+npm run dev         # wrangler dev — runs `npm run build` (so typecheck) before bundling
 ```
 
-There is no Go in this project — do not use `go-toolchain`.
+`wrangler.toml`'s `[build].command = "npm run build"`, so `dev`, `deploy`, and Cloudflare Workers
+Builds all typecheck first and a non-zero `tsc` exit aborts the build/deploy. There is no Go in this
+project — do not use `go-toolchain`.
 
 ## Deployment — NEVER deploy manually
 
