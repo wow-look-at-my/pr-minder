@@ -192,7 +192,9 @@ The cleanest way to avoid zombie PRs is to never create one. A common source is 
     // Optional: branches to never open PRs for (the default branch and gh-pages are always skipped).
     "skip_branches": ["staging"],
     // Optional: base for opened PRs (defaults to the repo's default branch).
-    "target_base": ""
+    "target_base": "",
+    // Optional: also delete the head branch when an empty PR is closed (default off).
+    "delete_branch_when_empty": false
   }
 }
 ```
@@ -206,8 +208,9 @@ Notes:
 - **Opt-in**, off by default. The default branch and `gh-pages` are always skipped; add more via `skip_branches`.
 - The PR is opened by the App, so its author is the App's bot (not `github-actions[bot]`) and `auto_trigger_workflows` correctly leaves it alone — it isn't a zombie.
 - Branches with no commits ahead of base, or that already have an open PR, are skipped. A branch ahead only by squash-merged commits (no net diff) is skipped too — opening it would just create an empty PR. Fork branches aren't opened (the head must be in this repo).
-- **Empty PRs are cleaned up** (`close_when_empty`, default on). A PR opened with real changes can go content-empty later — its content lands in the base another way (a sibling branch squash-merges the same change) — and that can't be prevented at open time. pr-minder closes such PRs (with a one-line comment) once their net diff against the base is empty. It only ever closes PRs **it opened itself** (authored by the App's bot), never a human's, and only on an exact zero-file diff (an unknown count is left alone). Set `"close_when_empty": false` to opt out.
-- Needs only the `pull_requests: write` / `contents: read` the App already has.
+- **Empty PRs are cleaned up** (`close_when_empty`, default on). A PR opened with real changes can go content-empty later — its content lands in the base another way (a sibling branch squash-merges the same change) — and that can't be prevented at open time. pr-minder closes such PRs (with a one-line comment) once their net diff against the base is empty. It closes **any** open non-draft PR with a zero net diff, regardless of who opened it — a human's empty PR is closed too (closing is reversible: it can be reopened) — and only on an exact zero-file diff (an unknown count is left alone). Set `"close_when_empty": false` to opt out.
+- **Closed branches can be deleted too** (`delete_branch_when_empty`, default **off**). When `close_when_empty` closes a content-empty PR, pr-minder can also delete that PR's head branch, so closed branches don't pile up. The branch is content-identical to its base (zero net diff), so deleting it loses nothing. Only a branch **in this repository** is deleted — a fork PR's head branch (which lives in the fork, and which pr-minder can't write to) is never touched — and GitHub itself refuses to delete the default or a protected branch. No effect unless `close_when_empty` is also on. Set `"delete_branch_when_empty": true` to enable.
+- Needs only the `pull_requests: write` / `contents: write` the App already has.
 
 This replaces the "open PRs for branches missing one" job people often run as a GitHub Actions workflow — and fixes its core flaw (PRs opened with `GITHUB_TOKEN` never run their own CI).
 
@@ -242,7 +245,10 @@ Notes:
 ## Local development
 
 ```sh
-npm run dev        # wrangler dev (no real webhooks without a tunnel)
-npm test           # vitest
-npm run typecheck  # tsc --noEmit
+npm run dev        # wrangler dev — typechecks, then bundles (no real webhooks without a tunnel)
+npm test           # tsc --noEmit && vitest  (tests can't pass with a type error)
+npm run build      # tsc --noEmit && gzip the docs (the command wrangler runs on deploy)
+npm run typecheck  # tsc --noEmit (standalone)
 ```
+
+Typecheck is baked into both the `build` and `test` scripts, and into `wrangler.toml`'s `[build]` step, so it can't be bypassed: esbuild — what vitest and wrangler bundle with — strips types without checking them, so `tsc` is the only gate.
