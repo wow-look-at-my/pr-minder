@@ -140,8 +140,9 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
 // A PR with no net diff can't be described — there's nothing to summarize. Instead of skipping
 // silently (which leaves an auto-opened orphan stuck with its branch name as the title), stamp its
 // title "[zero diff] <branch>" so it's instantly recognizable in the PR list. Scoped to pr-minder's
-// OWN bot PRs (mirroring closeEmptyAutoPrs's safety rule — a human's, or another bot's, PR is never
-// relabeled), and idempotent (a title already starting with the marker isn't re-PATCHed, so repeated
+// OWN bot PRs — unlike closeEmptyAutoPrs (which CLOSES any author's empty PR), a title rewrite mutates
+// content we may not own, so we only relabel PRs pr-minder itself opened; a human's title is left
+// untouched. Idempotent (a title already starting with the marker isn't re-PATCHed, so repeated
 // synchronizes are no-ops). This is the on-event label; auto_open_pr.close_when_empty (on by default)
 // still closes these on the next base update, and a later non-empty diff re-describes via the webhook.
 async function markZeroDiff(env: Env, repo: string, pr: any, token: string, log: Logger): Promise<void> {

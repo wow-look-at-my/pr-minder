@@ -101,7 +101,7 @@
           "uniqueItems": true
         },
         "close_when_empty": {
-          "description": "Close PRs pr-minder itself opened that have become content-empty — their net diff against the base is zero, e.g. because the branch's content already landed in the base via a squash merge. The open-time check prevents OPENING an empty PR, but a PR opened with a real diff can go empty afterwards (its content is merged another way), and the open check can't retract a PR that already exists; this is the cleanup. Only ever closes PRs authored by pr-minder's own App bot, so a human's PR is never touched. Runs when the default branch advances (a push to it) and on the install/backfill sweeps. Defaults to true.",
+          "description": "Close any open non-draft PR whose net diff against its base is zero (no changed files), regardless of who opened it — a 0-diff PR has nothing to review or merge and only wastes CI on each update. It doesn't matter how the PR became empty (a squash-merge orphan that's ahead by commit count but has no net content, a PR whose change landed in the base another way, etc.) or who authored it; a human's empty PR is closed too (closing is reversible — it can be reopened). Only an EXACTLY-zero changed-files count closes a PR; an unknown count (GitHub omitted the file list) is left alone. Runs when the default branch advances (a push to it) and on the install/backfill sweeps. Defaults to true.",
           "type": "boolean",
           "default": true
         }
