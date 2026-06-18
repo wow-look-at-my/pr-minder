@@ -47,10 +47,12 @@ export interface AutoOpenPr {
   // Which detected fork-point branches may be used as a base, as regex patterns. The repo's default
   // branch always qualifies; a non-default branch qualifies only if it matches one of these.
   baseBranchPatterns: string[];
-  // When true (default), close PRs pr-minder itself opened that have become content-empty — their
-  // net diff against the base is zero, e.g. after the branch's content landed in base via a squash
-  // merge (the open-time gate can't catch this, because the PR may go empty AFTER it was opened).
-  // Only ever closes PRs authored by pr-minder's own App bot, so it can never touch a human's PR.
+  // When true (default), close any open non-draft PR whose net diff against its base is zero (no
+  // changed files), regardless of who opened it. A 0-diff PR has nothing to review or merge and only
+  // wastes CI on each update, so it's closed; squash-merge orphans (ahead by commit count, no net
+  // content) are the common case, but it doesn't matter how the PR went empty or who authored it — a
+  // human's empty PR is closed too (closing is reversible). Only an EXACTLY-zero changed-files count
+  // closes a PR; an unknown count (GitHub omitted the file list) is left alone.
   closeWhenEmpty: boolean;
 }
 
