@@ -92,7 +92,7 @@ describe('isActionsBotPr', () => {
 
 describe('conflictLabelNames', () => {
   const baseCfg = (labels: PrMinderConfig['labels']): PrMinderConfig =>
-    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true }, autoDescribePr: { enabled: false, model: '' } });
+    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } });
   const opts = (mode?: 'auto_merge' | 'auto_update' | 'merge_conflict') =>
     ({ auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode, auto_merge_method: 'squash' as const });
 
@@ -221,7 +221,7 @@ describe('maybeOpenPrForBranch', () => {
   // auto_open_pr enabled, no fork-point: the path is compareCommits -> hasOpenPrForBranch -> createPull.
   const config = (): PrMinderConfig => ({
     triggers: [], labels: {}, autoTriggerWorkflows: false,
-    autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true },
+    autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false },
     autoDescribePr: { enabled: false, model: '' },
   });
 
@@ -393,7 +393,7 @@ describe('reconcileAutoMerge', () => {
 
   const label = (name: string) => ({ name });
   const cfg = (labels: PrMinderConfig['labels']): PrMinderConfig =>
-    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true }, autoDescribePr: { enabled: false, model: '' } });
+    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } });
   const autoMergeLabel = { auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode: 'auto_merge' as const, auto_merge_method: 'squash' as const };
 
   afterEach(() => vi.unstubAllGlobals());
@@ -532,7 +532,7 @@ describe('closeEmptyAutoPrs', () => {
   const env = () => ({} as any);
   const cfg = (over: Partial<PrMinderConfig['autoOpenPr']> = {}): PrMinderConfig => ({
     triggers: [], labels: {}, autoTriggerWorkflows: false,
-    autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, ...over },
+    autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false, ...over },
     autoDescribePr: { enabled: false, model: '' },
   });
 
@@ -551,9 +551,11 @@ describe('closeEmptyAutoPrs', () => {
   }
 
   const openPr = (n: number, over: Record<string, unknown> = {}) =>
-    ({ number: n, draft: false, user: { login: 'pr-minder[bot]' }, head: { ref: `claude/b${n}` }, base: { ref: 'main' }, ...over });
+    ({ number: n, draft: false, user: { login: 'pr-minder[bot]' }, head: { ref: `claude/b${n}`, repo: { full_name: 'o/r' } }, base: { ref: 'main' }, ...over });
   const closed = (fn: ReturnType<typeof stubFetch>, n: number) =>
     fn.mock.calls.some(([u, init]) => typeof u === 'string' && u.endsWith(`/pulls/${n}`) && init?.method === 'PATCH');
+  const deletedBranch = (fn: ReturnType<typeof stubFetch>, ref: string) =>
+    fn.mock.calls.some(([u, init]) => typeof u === 'string' && u.endsWith(`/git/refs/heads/${ref}`) && init?.method === 'DELETE');
 
   it('closes (with a comment) a PR whose net diff is empty', async () => {
     const fn = stubFetch([
@@ -590,6 +592,53 @@ describe('closeEmptyAutoPrs', () => {
     ]);
     await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
     expect(closed(fn, 250)).toBe(false);
+  });
+
+  it('deletes the head branch when delete_branch_when_empty is on', async () => {
+    const fn = stubFetch([
+      { match: '/pulls?', body: [openPr(243)] },
+      { match: '/compare/', body: { ahead_by: 39, behind_by: 0, files: [] } },
+      { match: '/issues/243/comments', status: 201, body: { id: 1 } },
+      { match: '/git/refs/heads/', status: 204, body: {} }, // deleteBranch
+      { match: '/pulls/243', body: {} },                    // closePull (PATCH)
+    ]);
+    await closeEmptyAutoPrs('o/r', cfg({ deleteBranchWhenEmpty: true }), 'tok', env(), new Logger());
+    expect(closed(fn, 243)).toBe(true);
+    expect(deletedBranch(fn, 'claude/b243')).toBe(true);
+  });
+
+  it('does NOT delete the head branch by default (delete_branch_when_empty off)', async () => {
+    const fn = stubFetch([
+      { match: '/pulls?', body: [openPr(243)] },
+      { match: '/compare/', body: { ahead_by: 39, behind_by: 0, files: [] } },
+      { match: '/issues/243/comments', status: 201, body: { id: 1 } },
+      { match: '/pulls/243', body: {} },
+    ]);
+    await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
+    expect(closed(fn, 243)).toBe(true);
+    expect(deletedBranch(fn, 'claude/b243')).toBe(false);
+  });
+
+  it('does NOT delete a fork PR head branch (head.repo.full_name !== repo) even when on', async () => {
+    const fn = stubFetch([
+      { match: '/pulls?', body: [openPr(243, { head: { ref: 'claude/b243', repo: { full_name: 'fork/r' } } })] },
+      { match: '/compare/', body: { ahead_by: 39, behind_by: 0, files: [] } },
+      { match: '/issues/243/comments', status: 201, body: { id: 1 } },
+      { match: '/pulls/243', body: {} },
+    ]);
+    await closeEmptyAutoPrs('o/r', cfg({ deleteBranchWhenEmpty: true }), 'tok', env(), new Logger());
+    expect(closed(fn, 243)).toBe(true);
+    expect(deletedBranch(fn, 'claude/b243')).toBe(false);
+  });
+
+  it('does not delete the branch of a kept (non-empty) PR', async () => {
+    const fn = stubFetch([
+      { match: '/pulls?', body: [openPr(250)] },
+      { match: '/compare/', body: { ahead_by: 1, behind_by: 0, files: [{ filename: 'doc.md' }] } },
+    ]);
+    await closeEmptyAutoPrs('o/r', cfg({ deleteBranchWhenEmpty: true }), 'tok', env(), new Logger());
+    expect(closed(fn, 250)).toBe(false);
+    expect(deletedBranch(fn, 'claude/b250')).toBe(false);
   });
 
   it('skips drafts (filtered before any compare)', async () => {

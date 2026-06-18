@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, searchPrsByLabel, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, searchPrsByLabel, deleteBranch, GhError } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -173,6 +173,31 @@ describe('retriggerWorkflows', () => {
     const fetchMock = stubFetch(403, { message: 'Resource not accessible by integration' });
     await expect(retriggerWorkflows('o/r', 5, 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('deleteBranch', () => {
+  it('issues a DELETE to the branch ref and resolves on 204', async () => {
+    const fetchMock = stubFetch(204, '');
+    await expect(deleteBranch('o/r', 'claude/b1', 'tok', new Logger())).resolves.toBeUndefined();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/o/r/git/refs/heads/claude/b1');
+    expect(init.method).toBe('DELETE');
+  });
+
+  it('resolves (no-op) on 404 — branch already gone, so the call is idempotent', async () => {
+    stubFetch(404, { message: 'Reference does not exist' });
+    await expect(deleteBranch('o/r', 'gone', 'tok', new Logger())).resolves.toBeUndefined();
+  });
+
+  it('resolves (no-op) on 422 — GitHub refuses to delete a default/protected branch', async () => {
+    stubFetch(422, { message: 'Reference cannot be deleted' });
+    await expect(deleteBranch('o/r', 'main', 'tok', new Logger())).resolves.toBeUndefined();
+  });
+
+  it('throws GhError on any other failure (e.g. 403)', async () => {
+    stubFetch(403, { message: 'Resource not accessible by integration' });
+    await expect(deleteBranch('o/r', 'claude/b1', 'tok', new Logger())).rejects.toBeInstanceOf(GhError);
   });
 });
 
