@@ -1,6 +1,5 @@
-import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, maybeOpenPrForBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile, conflictLabelNames, closeEmptyAutoPrs } from './handlers';
-import { resetAppBotLoginCache } from './github';
 import { Logger } from './logger';
 import { resetConfigCache, type PrMinderConfig } from './config';
 
@@ -526,23 +525,11 @@ describe('startupReconcile', () => {
 });
 
 describe('closeEmptyAutoPrs', () => {
-  // A real PKCS8 key so appBotLogin's JWT mint (appJWT -> importPkcs8 -> sign) succeeds; the mocked
-  // GET /app response then supplies the bot login. Generated once — key generation is the slow part.
-  let pem: string;
-  beforeAll(async () => {
-    const kp = (await crypto.subtle.generateKey(
-      { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
-      true, ['sign', 'verify'],
-    )) as CryptoKeyPair;
-    const der = new Uint8Array((await crypto.subtle.exportKey('pkcs8', kp.privateKey)) as ArrayBuffer);
-    const b64 = btoa(String.fromCharCode(...der)).match(/.{1,64}/g)!.join('\n');
-    pem = `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`;
-  });
-
-  beforeEach(() => resetAppBotLoginCache()); // re-resolve the bot login from the mock each test
   afterEach(() => vi.unstubAllGlobals());
 
-  const env = () => ({ GITHUB_APP_ID: 'app', GITHUB_APP_PRIVATE_KEY: pem } as any);
+  // closeEmptyAutoPrs closes any author's empty PR — it no longer resolves the App bot login, so the
+  // test env carries nothing it needs and there is no GET /app route to stub.
+  const env = () => ({} as any);
   const cfg = (over: Partial<PrMinderConfig['autoOpenPr']> = {}): PrMinderConfig => ({
     triggers: [], labels: {}, autoTriggerWorkflows: false,
     autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, ...over },
@@ -563,15 +550,14 @@ describe('closeEmptyAutoPrs', () => {
     return fn;
   }
 
-  const ourPr = (n: number, over: Record<string, unknown> = {}) =>
+  const openPr = (n: number, over: Record<string, unknown> = {}) =>
     ({ number: n, draft: false, user: { login: 'pr-minder[bot]' }, head: { ref: `claude/b${n}` }, base: { ref: 'main' }, ...over });
   const closed = (fn: ReturnType<typeof stubFetch>, n: number) =>
     fn.mock.calls.some(([u, init]) => typeof u === 'string' && u.endsWith(`/pulls/${n}`) && init?.method === 'PATCH');
 
-  it('closes (with a comment) an app-bot PR whose net diff is empty', async () => {
+  it('closes (with a comment) a PR whose net diff is empty', async () => {
     const fn = stubFetch([
-      { match: '/app', body: { slug: 'pr-minder' } },                          // appBotLogin -> pr-minder[bot]
-      { match: '/pulls?', body: [ourPr(243)] },                                // listOpenPulls
+      { match: '/pulls?', body: [openPr(243)] },                               // listOpenPulls
       { match: '/compare/', body: { ahead_by: 39, behind_by: 0, files: [] } }, // empty net diff
       { match: '/issues/243/comments', status: 201, body: { id: 1 } },         // commentOnPr
       { match: '/pulls/243', body: {} },                                       // closePull (PATCH)
@@ -581,52 +567,43 @@ describe('closeEmptyAutoPrs', () => {
     expect(fn.mock.calls.some(([u]) => typeof u === 'string' && u.includes('/issues/243/comments'))).toBe(true);
   });
 
-  it('also closes a github-actions[bot] PR whose net diff is empty', async () => {
-    const fn = stubFetch([
-      { match: '/app', body: { slug: 'pr-minder' } },                                       // appBotLogin -> pr-minder[bot]
-      { match: '/pulls?', body: [ourPr(125, { user: { login: 'github-actions[bot]' } })] }, // a default-GITHUB_TOKEN auto-PR
-      { match: '/compare/', body: { ahead_by: 9, behind_by: 0, files: [] } },               // squash-merge orphan: empty net diff
-      { match: '/issues/125/comments', status: 201, body: { id: 1 } },                       // commentOnPr
-      { match: '/pulls/125', body: {} },                                                     // closePull (PATCH)
-    ]);
-    await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
-    expect(closed(fn, 125)).toBe(true);
-  });
+  // The author filter was removed: a 0-diff PR is closed no matter who opened it — our own bot, the
+  // github-actions[bot] default-token orphans, another bot, or a human (closing is reversible).
+  it.each(['pr-minder[bot]', 'github-actions[bot]', 'dependabot[bot]', 'alice'])(
+    'closes an empty PR authored by %s',
+    async (login) => {
+      const fn = stubFetch([
+        { match: '/pulls?', body: [openPr(300, { user: { login } })] },
+        { match: '/compare/', body: { ahead_by: 9, behind_by: 0, files: [] } },
+        { match: '/issues/300/comments', status: 201, body: { id: 1 } },
+        { match: '/pulls/300', body: {} },
+      ]);
+      await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
+      expect(closed(fn, 300)).toBe(true);
+    },
+  );
 
-  it('keeps an app-bot PR that still has changes', async () => {
+  it('keeps a PR that still has changes', async () => {
     const fn = stubFetch([
-      { match: '/app', body: { slug: 'pr-minder' } },
-      { match: '/pulls?', body: [ourPr(250)] },
+      { match: '/pulls?', body: [openPr(250)] },
       { match: '/compare/', body: { ahead_by: 1, behind_by: 0, files: [{ filename: 'doc.md' }] } },
     ]);
     await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
     expect(closed(fn, 250)).toBe(false);
   });
 
-  it('never touches a human-authored PR, even when empty (filtered before any compare)', async () => {
+  it('skips drafts (filtered before any compare)', async () => {
     const fn = stubFetch([
-      { match: '/app', body: { slug: 'pr-minder' } },
-      { match: '/pulls?', body: [ourPr(260, { user: { login: 'alice' } })] },
+      { match: '/pulls?', body: [openPr(255, { draft: true })] },
     ]);
     await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
     expect(fn.mock.calls.some(([u]) => typeof u === 'string' && u.includes('/compare/'))).toBe(false);
-    expect(closed(fn, 260)).toBe(false);
-  });
-
-  it('never touches another bot (e.g. dependabot[bot]), even when empty', async () => {
-    const fn = stubFetch([
-      { match: '/app', body: { slug: 'pr-minder' } },
-      { match: '/pulls?', body: [ourPr(280, { user: { login: 'dependabot[bot]' } })] },
-    ]);
-    await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
-    expect(fn.mock.calls.some(([u]) => typeof u === 'string' && u.includes('/compare/'))).toBe(false);
-    expect(closed(fn, 280)).toBe(false);
+    expect(closed(fn, 255)).toBe(false);
   });
 
   it('does not close when the changed-files count is unknown (compare omits files)', async () => {
     const fn = stubFetch([
-      { match: '/app', body: { slug: 'pr-minder' } },
-      { match: '/pulls?', body: [ourPr(270)] },
+      { match: '/pulls?', body: [openPr(270)] },
       { match: '/compare/', body: { ahead_by: 5, behind_by: 0 } }, // no files field -> null -> keep
     ]);
     await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
@@ -643,14 +620,5 @@ describe('closeEmptyAutoPrs', () => {
     const fn = stubFetch([{ match: '://', body: {} }]);
     await closeEmptyAutoPrs('o/r', cfg({ enabled: false }), 'tok', env(), new Logger());
     expect(fn).not.toHaveBeenCalled();
-  });
-
-  it('skips (closes nothing) when the App bot login cannot be resolved', async () => {
-    const fn = stubFetch([
-      { match: '/app', status: 500, body: 'boom' }, // appBotLogin -> null
-    ]);
-    await closeEmptyAutoPrs('o/r', cfg(), 'tok', env(), new Logger());
-    // It bailed after /app; it never even listed PRs.
-    expect(fn.mock.calls.some(([u]) => typeof u === 'string' && u.includes('/pulls'))).toBe(false);
   });
 });

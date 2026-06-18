@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, appBotLogin, closePull, commentOnPr, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, closePull, commentOnPr, gh } from './github';
 import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, markSwept, recentlySwept } from './state';
 import { describeSafely, shouldDescribe } from './describe';
 import type { Logger } from './logger';
@@ -361,8 +361,9 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
     await enqueueConflictChecks(env, prs, repo, log);
   }
 
-  // The default branch just advanced, so an auto-opened PR whose content landed in it (e.g. via a
-  // sibling squash-merge) is now content-empty — close those. No-op unless auto_open_pr is on.
+  // The default branch just advanced, so any open PR whose content landed in it (e.g. via a sibling
+  // squash-merge) is now content-empty — close those, whoever opened them. No-op unless auto_open_pr
+  // + close_when_empty are on.
   await closeEmptyAutoPrs(repo, config, token, env, log);
 }
 
@@ -494,32 +495,30 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
   }
 }
 
-// Close PRs pr-minder itself opened that have gone content-empty (zero net diff against base). The
-// open-time gate in maybeOpenPrForBranch stops pr-minder OPENING an empty PR, but a PR opened with a
-// real diff can become empty LATER — its content lands in base another way, e.g. a sibling branch
-// squash-merges the same change — and the open gate can't retract a PR that already exists. This is
-// the complementary cleanup. Safety: it only closes PRs authored by the App's OWN bot
-// (`{slug}[bot]`) or by `github-actions[bot]` (the default-GITHUB_TOKEN auto-PRs that auto_open_pr
-// replaced — they strand the same squash-merge orphans), so a human's PR, or any other bot's, is
-// never touched; and it closes only when compareCommits reports EXACTLY zero changed files. A
-// null/unknown count (GitHub omitted the files array) is left alone — "unknown" must never be
-// mistaken for "empty", the same rule the open gate uses. Wired to run where the base can have just
-// advanced (push to the default branch) and on the
-// install/backfill sweeps, mirroring where maybeOpenPrsForRepo runs.
+// Close EVERY open non-draft PR whose net diff against its base is empty (zero changed files),
+// regardless of author. A 0-diff PR has nothing to review or merge and only wastes CI on each
+// update, so it's closed; it doesn't matter how it became empty or who opened it — a human's empty
+// PR is closed too (closing is reversible: they can reopen). Squash-merge orphans (ahead by commit
+// *count*, zero net content) are the common case. This complements the open-time gate in
+// maybeOpenPrForBranch, which stops pr-minder OPENING an empty PR but can't retract one that goes
+// empty AFTER it was opened (its content lands in base another way, e.g. a sibling squash-merge).
+// It closes only when compareCommits reports EXACTLY zero changed files; a null/unknown count
+// (GitHub omitted the files array) is left alone — "unknown" must never be mistaken for "empty", the
+// same fail-open rule the open gate uses. Gated on auto_open_pr.enabled + close_when_empty (both
+// default-on), so it costs nothing where the feature is off. Wired to run where the base can have
+// just advanced (push to the default branch) and on the install/backfill sweeps, mirroring where
+// maybeOpenPrsForRepo runs.
 export async function closeEmptyAutoPrs(repo: string, config: PrMinderConfig, token: string, env: Env, log: Logger): Promise<void> {
   if (!config.autoOpenPr.enabled || !config.autoOpenPr.closeWhenEmpty) return;
-  const botLogin = await appBotLogin(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
-  if (!botLogin) { log.log(`${repo}: skip empty-PR sweep (could not resolve the App bot login)`); return; }
   const prs = await listOpenPulls(repo, token, log);
-  // Our own bot's PRs, plus github-actions[bot]'s — both auto-open the same squash-merge orphans.
-  const closeable = prs.filter((pr) => !pr.draft && (pr.user?.login === botLogin || isActionsBotPr(pr)) && pr.head?.ref && pr.base?.ref);
+  const closeable = prs.filter((pr) => !pr.draft && pr.head?.ref && pr.base?.ref);
   if (closeable.length === 0) return;
-  log.log(`${repo}: empty-PR sweep over ${closeable.length} candidate PR(s) (${botLogin} or github-actions[bot])`);
+  log.log(`${repo}: empty-PR sweep over ${closeable.length} open PR(s)`);
   for (const pr of closeable) {
     try {
       const cmp = await compareCommits(repo, pr.base.ref, pr.head.ref, token, log);
       if (!cmp || cmp.changed_files !== 0) continue; // compare failed, or unknown/non-empty diff -> keep
-      log.log(`${repo}#${pr.number}: closing auto-opened PR with no net diff vs ${pr.base.ref}`);
+      log.log(`${repo}#${pr.number}: closing PR with no net diff vs ${pr.base.ref}`);
       await commentOnPr(repo, pr.number, `Auto-closing: this branch has no changes against \`${pr.base.ref}\` — its content is already in the base, so there is nothing to review.`, token, log);
       await closePull(repo, pr.number, token, log);
     } catch (e) {
