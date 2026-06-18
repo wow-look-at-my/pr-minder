@@ -1,6 +1,6 @@
 import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, closePull, commentOnPr, gh } from './github';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, closePull, commentOnPr, deleteBranch, gh } from './github';
 import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, markSwept, recentlySwept } from './state';
 import { describeSafely, shouldDescribe } from './describe';
 import type { Logger } from './logger';
@@ -521,6 +521,12 @@ export async function closeEmptyAutoPrs(repo: string, config: PrMinderConfig, to
       log.log(`${repo}#${pr.number}: closing PR with no net diff vs ${pr.base.ref}`);
       await commentOnPr(repo, pr.number, `Auto-closing: this branch has no changes against \`${pr.base.ref}\` — its content is already in the base, so there is nothing to review.`, token, log);
       await closePull(repo, pr.number, token, log);
+      // Optionally delete the now-closed branch (default off). Only a same-repo head: a fork PR's
+      // head lives in the fork (head.repo.full_name !== repo), which we neither own nor can write to.
+      // The branch has a zero net diff against its base, so deleting it loses nothing.
+      if (config.autoOpenPr.deleteBranchWhenEmpty && pr.head.repo?.full_name === repo) {
+        await deleteBranch(repo, pr.head.ref, token, log);
+      }
     } catch (e) {
       log.log(`${repo}#${pr.number}: close-empty failed: ${(e as Error).message}`);
     }

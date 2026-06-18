@@ -408,6 +408,24 @@ export async function closePull(repo: string, num: number, token: string, log: L
   throw new GhError(r.status, body);
 }
 
+// Delete a branch via its ref (DELETE /repos/{repo}/git/refs/heads/{branch}). GitHub answers 204 on
+// success. Two non-2xx outcomes are expected and treated as no-ops rather than errors: 404 (the
+// branch is already gone, so the call is idempotent) and 422 (GitHub refuses to delete the repo's
+// default branch or a protected one — a sane safety net we never want to fight). Any other failure
+// throws so the caller's per-PR try/catch logs it with context. Branch names keep their slashes in
+// the path; git ref rules forbid the characters that would otherwise need encoding (same as compareCommits).
+export async function deleteBranch(repo: string, branch: string, token: string, log: Logger): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${repo}/git/refs/heads/${branch}`, {
+    method: 'DELETE',
+    headers: ghHeaders(token),
+  });
+  if (r.ok || r.status === 404) { log.log(`deleteBranch ${repo} ${branch}: ${r.status}`); return; }
+  const body = await r.text();
+  log.log(`deleteBranch ${repo} ${branch}: ${r.status} ${body}`);
+  if (r.status === 422) return; // default/protected branch — GitHub won't delete it; not retryable
+  throw new GhError(r.status, body);
+}
+
 // Post an issue comment on a PR (best-effort). A failure here must never block the action it
 // explains (e.g. closing an empty PR), so it logs and swallows rather than throwing.
 export async function commentOnPr(repo: string, num: number, body: string, token: string, log: Logger): Promise<void> {

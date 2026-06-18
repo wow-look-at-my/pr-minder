@@ -104,6 +104,11 @@
           "description": "Close any open non-draft PR whose net diff against its base is zero (no changed files), regardless of who opened it — a 0-diff PR has nothing to review or merge and only wastes CI on each update. It doesn't matter how the PR became empty (a squash-merge orphan that's ahead by commit count but has no net content, a PR whose change landed in the base another way, etc.) or who authored it; a human's empty PR is closed too (closing is reversible — it can be reopened). Only an EXACTLY-zero changed-files count closes a PR; an unknown count (GitHub omitted the file list) is left alone. Runs when the default branch advances (a push to it) and on the install/backfill sweeps. Defaults to true.",
           "type": "boolean",
           "default": true
+        },
+        "delete_branch_when_empty": {
+          "description": "When closing a content-empty PR (see close_when_empty), also delete its head branch, so closed branches don't pile up. The branch is content-identical to its base (zero net diff), so deleting it loses nothing. Only branches in this repository are deleted — a fork PR's head branch (which lives in the fork) is left untouched — and GitHub itself refuses to delete the default or a protected branch. Has no effect unless close_when_empty is also on. Off by default: deleting a branch is the one part of the empty-PR cleanup that isn't trivially reversible.",
+          "type": "boolean",
+          "default": false
         }
       }
     },

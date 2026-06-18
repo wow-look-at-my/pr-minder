@@ -25,7 +25,7 @@ describe('mergeConfig', () => {
       triggers: [],
       labels: {},
       autoTriggerWorkflows: false,
-      autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true },
+      autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false },
       autoDescribePr: { enabled: false, model: '' },
     });
   });
@@ -96,14 +96,14 @@ describe('mergeConfig', () => {
 
   describe('auto_open_pr', () => {
     it('defaults to disabled with empty skip list and base', () => {
-      expect(mergeConfig({}, null).autoOpenPr).toEqual({ enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true });
+      expect(mergeConfig({}, null).autoOpenPr).toEqual({ enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false });
     });
 
     it('parses enabled, skip_branches and target_base', () => {
       const cfg = mergeConfig({
         auto_open_pr: { enabled: true, skip_branches: ['staging', 'release'], target_base: 'develop' },
       }, null);
-      expect(cfg.autoOpenPr).toEqual({ enabled: true, skipBranches: ['staging', 'release'], skipBranchPatterns: [], targetBase: 'develop', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true });
+      expect(cfg.autoOpenPr).toEqual({ enabled: true, skipBranches: ['staging', 'release'], skipBranchPatterns: [], targetBase: 'develop', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false });
     });
 
     it('parses skip_branch_patterns, base_from_fork_point and base_branch_patterns', () => {
@@ -131,6 +131,19 @@ describe('mergeConfig', () => {
       expect(mergeConfig({ auto_open_pr: { close_when_empty: 'no' } }, null).autoOpenPr.closeWhenEmpty).toBe(true);
     });
 
+    it('delete_branch_when_empty defaults to false and parses an explicit opt-in', () => {
+      expect(mergeConfig({}, null).autoOpenPr.deleteBranchWhenEmpty).toBe(false);
+      expect(mergeConfig({ auto_open_pr: { delete_branch_when_empty: true } }, null).autoOpenPr.deleteBranchWhenEmpty).toBe(true);
+      // a non-boolean is ignored, leaving the default
+      expect(mergeConfig({ auto_open_pr: { delete_branch_when_empty: 'yes' } }, null).autoOpenPr.deleteBranchWhenEmpty).toBe(false);
+    });
+
+    it('a per-repo override can enable delete_branch_when_empty independently of close_when_empty', () => {
+      const cfg = mergeConfig({ auto_open_pr: { enabled: true } }, { auto_open_pr: { delete_branch_when_empty: true } });
+      expect(cfg.autoOpenPr.deleteBranchWhenEmpty).toBe(true);
+      expect(cfg.autoOpenPr.closeWhenEmpty).toBe(true); // unchanged default
+    });
+
     it('drops non-string entries from skip_branches', () => {
       const cfg = mergeConfig({ auto_open_pr: { enabled: true, skip_branches: ['ok', 3, null] } }, null);
       expect(cfg.autoOpenPr.skipBranches).toEqual(['ok']);
@@ -151,7 +164,7 @@ describe('mergeConfig', () => {
         { auto_open_pr: { enabled: true, target_base: 'main' } },
         { auto_open_pr: { skip_branches: ['wip'] } },
       );
-      expect(cfg.autoOpenPr).toEqual({ enabled: true, skipBranches: ['wip'], skipBranchPatterns: [], targetBase: 'main', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true });
+      expect(cfg.autoOpenPr).toEqual({ enabled: true, skipBranches: ['wip'], skipBranchPatterns: [], targetBase: 'main', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false });
     });
   });
 
