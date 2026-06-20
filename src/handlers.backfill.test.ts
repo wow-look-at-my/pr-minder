@@ -32,11 +32,12 @@ describe('enabledBackfillCaps', () => {
     expect(enabledBackfillCaps(cfg({ autoTriggerWorkflows: true }))).toEqual(['zombie']);
     expect(enabledBackfillCaps(cfg({ autoOpenPr: { ...cfg().autoOpenPr, enabled: true } }))).toEqual(['openpr']);
     expect(enabledBackfillCaps(cfg({ labels: { x: conflictLabel } }))).toEqual(['conflict']);
+    expect(enabledBackfillCaps(cfg({ autoDescribePr: { enabled: true, model: '' } }))).toEqual(['describe']);
   });
 
   it('reports every enabled capability together', () => {
-    const c = cfg({ autoTriggerWorkflows: true, autoOpenPr: { ...cfg().autoOpenPr, enabled: true }, labels: { x: conflictLabel } });
-    expect(enabledBackfillCaps(c).sort()).toEqual(['conflict', 'openpr', 'zombie']);
+    const c = cfg({ autoTriggerWorkflows: true, autoOpenPr: { ...cfg().autoOpenPr, enabled: true }, labels: { x: conflictLabel }, autoDescribePr: { enabled: true, model: '' } });
+    expect(enabledBackfillCaps(c).sort()).toEqual(['conflict', 'describe', 'openpr', 'zombie']);
   });
 });
 
@@ -96,7 +97,7 @@ describe('maybeBackfillRepo', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('does nothing (no token mint, no fetch) once every capability is already backfilled', async () => {
-    const { env } = fakeKV({ 'backfill:o/r': 'conflict,openpr,zombie' });
+    const { env } = fakeKV({ 'backfill:o/r': 'conflict,describe,openpr,zombie' });
     const fetchMock = stubFetch([{ match: '://', body: {} }]);
     await maybeBackfillRepo('o/r', 123, env, new Logger());
     expect(fetchMock).not.toHaveBeenCalled();

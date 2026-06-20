@@ -1,4 +1,4 @@
-// Workers KV state for the zombie check. Seven kinds of key:
+// Workers KV state for the zombie check. Eight kinds of key:
 //   pr:{repo}#{num}        -> the head SHA we last evaluated that PR at
 //   backfill:{repo}        -> the catch-up capabilities already swept for a repo (a CSV subset of
 //                             BACKFILL_CAPS), so a feature enabled AFTER the first sweep still gets
@@ -8,6 +8,11 @@
 //                             by the cron's runConflictChecks (see setConflictCheck) — GitHub
 //                             computes mergeability asynchronously, so a base/head change is flagged
 //                             here and the label settled once the answer is ready
+//   describe:{repo}#{num}  -> a self-set "describe this PR later" reminder for the auto_describe_pr
+//                             backfill, drained by the cron's runDescribeChecks (see
+//                             setDescribeCheck) — catches a never-described PR (one opened before
+//                             the feature/install, or whose opened-event hand-off failed) that no
+//                             live synchronize will ever revisit
 //   swept:{owner}          -> a short-lived per-owner cooldown for the auto-merge backstop, so it
 //                             doesn't re-search on every webhook (see markSwept/recentlySwept)
 //   desc:{repo}#{num}      -> SHA-256 of the PR diff the auto_describe_pr metadata was last
@@ -31,6 +36,9 @@ const RECHECK_TTL_S = 86400; // a reminder self-expires after a day if a sweep n
 const CONFLICT_PREFIX = 'conflict:';
 const conflictKey = (repo: string, num: number) => `${CONFLICT_PREFIX}${repo}#${num}`;
 const CONFLICT_TTL_S = 86400; // same safety net as recheck: a stale reminder can't linger past a day
+const DESCRIBE_PREFIX = 'describe:';
+const describeCheckKey = (repo: string, num: number) => `${DESCRIBE_PREFIX}${repo}#${num}`;
+const DESCRIBE_TTL_S = 86400; // same safety net: a backfill reminder for a gone PR self-expires in a day
 const sweptKey = (owner: string) => `swept:${owner}`;
 
 export async function checkedSha(kv: KVNamespace, repo: string, num: number): Promise<string | null> {
@@ -44,8 +52,8 @@ export async function markChecked(kv: KVNamespace, repo: string, num: number, sh
 // The catch-up sweeps maybeBackfillRepo runs, each gated on a config feature. The backfill:{repo}
 // value is the CSV of those already done for a repo; a capability missing from it — because the
 // feature was enabled after the first sweep, or the value predates this scheme — triggers its sweep.
-export type BackfillCap = 'zombie' | 'openpr' | 'conflict';
-export const BACKFILL_CAPS: readonly BackfillCap[] = ['zombie', 'openpr', 'conflict'];
+export type BackfillCap = 'zombie' | 'openpr' | 'conflict' | 'describe';
+export const BACKFILL_CAPS: readonly BackfillCap[] = ['zombie', 'openpr', 'conflict', 'describe'];
 
 // The capabilities already backfilled for a repo. Only recognized BACKFILL_CAPS are returned, so the
 // legacy value (the ISO timestamp the old boolean flag stored) yields an empty set — "nothing
@@ -123,6 +131,25 @@ export async function clearConflictCheck(kv: KVNamespace, repo: string, num: num
 
 export async function listConflictChecks(kv: KVNamespace): Promise<Array<{ repo: string; num: number }>> {
   return listReminders(kv, CONFLICT_PREFIX);
+}
+
+// A "describe this PR later" reminder for the auto_describe_pr backfill — the catch-up analogue of
+// setConflictCheck. auto_describe_pr is otherwise purely live (opened/ready_for_review/synchronize),
+// so a PR opened before the feature existed (or before the App was installed), or whose opened-event
+// hand-off failed, never gets a description: no later event revisits it. The backfill enqueues such
+// PRs here (on a default-branch push, the first-webhook backfill, and install sweeps) and the cron
+// (runDescribeChecks) hands each off once. Keyed per PR; the TTL bounds a reminder for a PR that's
+// since gone away or been described another way.
+export async function setDescribeCheck(kv: KVNamespace, repo: string, num: number): Promise<void> {
+  await kv.put(describeCheckKey(repo, num), new Date().toISOString(), { expirationTtl: DESCRIBE_TTL_S });
+}
+
+export async function clearDescribeCheck(kv: KVNamespace, repo: string, num: number): Promise<void> {
+  await kv.delete(describeCheckKey(repo, num));
+}
+
+export async function listDescribeChecks(kv: KVNamespace): Promise<Array<{ repo: string; num: number }>> {
+  return listReminders(kv, DESCRIBE_PREFIX);
 }
 
 // The diff fingerprint auto_describe_pr last generated metadata from, keyed per PR. A
