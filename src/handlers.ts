@@ -1,7 +1,7 @@
 import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
 import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, closePull, commentOnPr, deleteBranch, appBotLogin, gh } from './github';
-import { checkedSha, markChecked, backfilledCaps, markBackfilled, BACKFILL_CAPS, type BackfillCap, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, setDescribeCheck, clearDescribeCheck, listDescribeChecks, describedDiffHash, markSwept, recentlySwept } from './state';
+import { checkedSha, markChecked, backfilledCaps, markBackfilled, BACKFILL_CAPS, type BackfillCap, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, setDescribeCheck, clearDescribeCheck, listDescribeChecks, describedDiffHash } from './state';
 import { describeSafely, shouldDescribe } from './describe';
 import type { Logger } from './logger';
 
@@ -27,16 +27,11 @@ export function resetBackfillThrottle(): void {
   backfillCheckedAt.clear();
 }
 
-// GitHub-call budgets for the search-based auto-merge backstop (reconcileInstall). Each unit ~= one
-// external GitHub fetch; the budget keeps a single invocation well under the 50-external-subrequest
-// cap (and leaves headroom for the work the same invocation already did). The webhook pass is the
-// smallest because it shares the event's invocation; the cron has a fresh invocation. Owners/PRs not
-// reached within budget are picked up on the next cron tick or webhook.
+// GitHub-call budget for startupReconcile/reconcileAllInstalls (the search-based auto-merge backstop).
+// These are now invoked by the pr-minder-reconcile webhook-runner hook, not the Worker's entry points
+// (the cron/startup/per-webhook fleet reconciliation moved there); the function + budget are kept as
+// the tested, ported reference and for any direct invocation. Each unit ~= one external GitHub fetch.
 const STARTUP_SWEEP_BUDGET = 30;
-const WEBHOOK_SWEEP_BUDGET = 15;
-// Per-owner cooldown (seconds) between webhook-driven backstop runs, so a burst of webhooks for one
-// owner can't exceed GitHub's ~30/min search rate limit. The cron pass ignores this.
-const BACKSTOP_COOLDOWN_S = 60;
 
 // The GitHub event types pr-minder actually acts on (the same set dispatch() routes). Every other
 // delivery is dropped at the very top of handle() — before any token mint, KV access, or the
@@ -81,24 +76,11 @@ export async function handle(event: string | null, p: any, env: Env, log: Logger
 
   await dispatch(event, p, env, log, defer);
 
-  // Auto-merge backstop: after handling the event, opportunistically re-arm any auto_merge-labeled PR
-  // in this owner that the live path may have dropped (the failure mode that left PRs unmerged with no
-  // error). Cooldown-gated per owner so a burst of webhooks can't exceed GitHub's search rate limit;
-  // the cron is the unconditional periodic pass. Self-feeding — a merge here emits its own webhook,
-  // which drains the next. Failures are swallowed: the backstop must never fail the webhook. The
-  // cooldown is claimed before running so concurrent isolates don't pile on.
-  if (repo && p.installation?.id && env.PR_STATE) {
-    const owner = repo.split('/')[0];
-    try {
-      if (!(await recentlySwept(env.PR_STATE, owner))) {
-        await markSwept(env.PR_STATE, owner, BACKSTOP_COOLDOWN_S);
-        const token = await installToken(p.installation.id, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
-        await reconcileInstall(owner, token, log, { calls: WEBHOOK_SWEEP_BUDGET });
-      }
-    } catch (e) {
-      log.log(`backstop ${owner}: ${(e as Error).message}`);
-    }
-  }
+  // The per-webhook auto-merge backstop (a cooldown-gated cross-installation search) has moved to the
+  // pr-minder-reconcile webhook-runner hook, along with the cron/startup fleet reconciliation — so the
+  // webhook path no longer runs a fleet search at all. Steady-state auto-merge is still driven by the
+  // live labeled/unlabeled/auto_merge_enabled/auto_merge_disabled events (handled in onPR); the hook is
+  // the durable backstop for anything those drop.
 }
 
 // Route an event to its handler. Extracted from handle() so the auto-merge backstop runs after the

@@ -1,7 +1,7 @@
 // MIT
 // GitHub App must subscribe to: pull_request, pull_request_review, push
 // Also handles: installation, installation_repositories (auto-delivered to all apps)
-import { handle, startupReconcile, runRechecks, runConflictChecks, runDescribeChecks, reconcileAllInstalls } from './handlers';
+import { handle, runRechecks, runConflictChecks, runDescribeChecks } from './handlers';
 import { GhError } from './github';
 import { Logger } from './logger';
 import { verifyWebhook } from './webhook';
@@ -33,19 +33,8 @@ export interface Env {
   PR_MINDER_PUBLIC_URL?: string;
 }
 
-// Reconcile-on-startup, not poll. Each fresh isolate (e.g. after a deploy) runs the cross-repo
-// auto-merge reconcile exactly once, on its first request, in the background via waitUntil — so a
-// redeploy heals any PR whose auto-merge state drifted while an older version was running. Steady
-// state is driven entirely by webhooks; this flag makes the sweep fire once per isolate, never per
-// request.
-let startupSwept = false;
-
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    if (!startupSwept) {
-      startupSwept = true;
-      ctx.waitUntil(startupReconcile(env, new Logger()).catch(() => {}));
-    }
     // GitHub delivers webhooks via POST; GET serves the public documentation.
     if (req.method === 'GET' || req.method === 'HEAD') return serveDocs(req);
     if (req.method !== 'POST') return new Response('nope', { status: 405 });
@@ -82,27 +71,27 @@ export default {
     return new Response(log.toString() || 'ok', { status, headers: { 'content-type': 'text/plain' } });
   },
 
-  // Cron entry point ([triggers] crons in wrangler.toml). Four cheap passes:
-  //  1) runRechecks — drains the `recheck:` reminders reviveIfZombie leaves for follow-up commits
-  //     too fresh to judge when their webhook arrived. With no reminders it's a single KV list.
-  //  2) runConflictChecks — drains the `conflict:` reminders that base/head moves left behind,
-  //     settling each PR's merge_conflict label once GitHub has computed mergeability. Also a single
-  //     KV list when nothing is pending; budget-bounded otherwise.
-  //  3) runDescribeChecks — drains the `describe:` reminders the auto_describe_pr backfill left, so a
-  //     never-described PR (opened before the feature/install, or a failed opened-event hand-off)
-  //     gets described. A single KV list when nothing is pending; budget-bounded otherwise.
-  //  4) reconcileAllInstalls — the auto-merge backstop: per installation, search for auto_merge-
-  //     labeled PRs and arm/merge any the live webhook path dropped. Cost scales with labeled PRs
-  //     (a search + a couple calls each), not repo count, and is budget-bounded so it stays well
-  //     under the subrequest cap; owners not reached this tick are picked up on the next.
-  // The budgets are sized so the passes together stay under the ~50-subrequest cap of a single
-  // invocation (runRechecks is self-limiting — only deferred fresh commits — so it has no fixed one).
+  // Cron entry point ([triggers] crons in wrangler.toml). Three cheap, bounded KV-reminder drains —
+  // each reads only its own reminders (a single KV list when none are pending, zero GitHub calls),
+  // so the cron no longer fans out across the fleet or fights the 50-subrequest cap:
+  //  1) runRechecks — drains the `recheck:` reminders reviveIfZombie leaves for follow-up commits too
+  //     fresh to judge when their webhook arrived. Stays here: zombie revival is the Worker's, not the
+  //     reconcile hook's, and it is coupled to the Worker's own KV markers.
+  //  2) runConflictChecks — drains the `conflict:` reminders left by a PR's own events / a default
+  //     push, settling each merge_conflict label once GitHub computed mergeability. Budget-bounded.
+  //  3) runDescribeChecks — drains the `describe:` reminders the auto_describe_pr backfill left.
+  //     Budget-bounded.
+  // The FLEET-WIDE reconciliation that used to run here (reconcileAllInstalls — the cross-installation
+  // auto-merge backstop — plus the once-per-deploy startupReconcile and the per-webhook backstop in
+  // handle()) has MOVED to the pr-minder-reconcile webhook-runner hook (wow-look-at-my/webhooks): a
+  // container with no subrequest cap, a multi-minute timeout, and durable retries. That hook also runs
+  // the comprehensive auto_open_pr catch-up, close-empty, merge_conflict, and describe-backfill sweeps
+  // fleet-wide; these bounded drains are the cheap, latency-bound complement the Worker keeps.
   async scheduled(_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     const log = new Logger();
     await runRechecks(env, log);
     await runConflictChecks(env, log, { calls: 12 });
     await runDescribeChecks(env, log, { calls: 10 });
-    await reconcileAllInstalls(env, log, { calls: 26 });
   },
 };
 
