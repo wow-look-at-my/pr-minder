@@ -125,40 +125,34 @@ It will not loop: pr-minder's own reopen comes back as a `reopened` event sent b
 |-------|---------|
 | `enabled` | Turn the feature on (default `false`). |
 | `skip_branches` | Extra branch names (exact match) to never open PRs for. The default branch and `gh-pages` are always skipped. |
-| `skip_branch_patterns` | Extra branches to never open PRs for, as regex patterns matched against the branch name (anchor with `^...$`). Excludes a whole family at once — e.g. `["^\\d+\\.\\d+\\.\\d+$"]` keeps version branches like `2.1.81` from each becoming a PR head. A malformed pattern simply never matches. |
-| `target_base` | Base branch for opened PRs (default: the repo's default branch). When `base_from_fork_point` is on, this is the fallback used when no fork point is detected. |
-| `base_from_fork_point` | Detect each branch's base from its **fork point** instead of always using `target_base` (default `false`). |
-| `base_branch_patterns` | When `base_from_fork_point` is on, which non-default branches may be selected as a base (regex patterns). The default branch always qualifies. |
+| `skip_branch_patterns` | Extra branches to never open PRs for, as regex patterns matched against the branch name (anchor with `^...$`). Excludes a whole family at once — e.g. `["^\\d+\\.\\d+\\.\\d+$"]` keeps version branches like `2.1.81` from each becoming a PR head (they can still be auto-detected as another branch's base — see below). A malformed pattern simply never matches. |
 | `close_when_empty` | Close **any** open PR with a zero net diff against the base, regardless of who opened it (default `true`). See below. |
 | `delete_branch_when_empty` | When `close_when_empty` closes a content-empty PR, also delete its head branch (default `false`). See below. |
 
-It runs on a push to a non-default branch (opening the PR as soon as the branch gets a commit) and sweeps existing branches once when the App is installed or repositories are added. Fork branches are not opened.
+The **base is detected automatically** from each branch's fork point — there is no setting for it (see below). It runs on a push to a non-default branch (opening the PR as soon as the branch gets a commit) and sweeps existing branches once when the App is installed or repositories are added. Fork branches are not opened.
 
 **Closing content-empty PRs (`close_when_empty`, default on).** A 0-diff PR — no net change against its base — has nothing to review or merge and only wastes CI on each update, so pr-minder **closes** it. It doesn't matter how the PR became empty (a squash-merge orphan that's ahead by commit count but has no net content, or a PR opened with real changes whose content later landed in the base another way) or **who opened it** — a human's empty PR is closed too (closing is reversible: it can be reopened). For each open non-draft PR it closes — with a one-line comment — only when the net diff against the base is exactly zero (an unknown/omitted file count is left alone). This runs when the default branch advances (a push to it) and on the install/backfill sweeps. Set `close_when_empty: false` to opt out.
 
 **Deleting the branch too (`delete_branch_when_empty`, default off).** When `close_when_empty` closes a content-empty PR, pr-minder can also delete that PR's head branch, so closed branches don't pile up. The branch is content-identical to its base (zero net diff), so deleting it loses nothing. Only a branch **in this repository** is deleted — a fork PR's head branch (which lives in the fork, and which pr-minder can't write to) is left untouched — and GitHub itself refuses to delete the default or a protected branch. It has no effect unless `close_when_empty` is also on, and is off by default because deleting a branch is the one part of the empty-PR cleanup that isn't trivially reversible. Set `delete_branch_when_empty: true` to enable.
 
-**Fork-point base detection.** With `base_from_fork_point: true`, pr-minder picks the base by walking the branch's commits newest-first and taking the first ancestor that is the HEAD of another *qualifying* branch — the default branch, or one matching `base_branch_patterns`. This suits an archive/version-branch layout: an investigation branch forked from a long-lived version branch (whose tip never moves, so it *is* the fork point) is opened back into that version branch, while a branch forked off the default branch goes into the default branch. When no qualifying fork point is found it falls back to `target_base` (or the default branch).
+**Automatic fork-point base detection.** The base is always chosen by **where the branch came from**, with no configuration: pr-minder walks the branch's commits newest-first and targets the first ancestor that is the HEAD of *any other* branch — the branch this one was forked from. Git already knows this (your history passes through the tip of the branch you branched off), so a branch forked from another working branch targets **that** branch, not the default branch underneath it; a branch forked off the default branch targets the default branch. The nearest such branch wins (it's the most specific fork point); if the fork-point commit is several branches' tip, the default branch is preferred. When no ancestor is any branch's tip, it falls back to the repository's default branch. This also suits an archive/version-branch layout for free: a working branch forked from a long-lived version branch (whose tip never moves, so it *is* the fork point) opens back into that version branch — you only need to keep the version branches themselves from becoming PR heads, with `skip_branch_patterns`.
 
 ```jsonc
 {
   "auto_open_pr": {
     "enabled": true,
-    "skip_branches": ["staging"],
-    "target_base": ""
+    "skip_branches": ["staging"]
   }
 }
 ```
 
-Archive-repo example — open each working branch back into the version branch it forked from, and never open a PR from a version branch itself:
+Archive-repo example — open each working branch back into the version branch it forked from (detected automatically), and never open a PR from a version branch itself:
 
 ```jsonc
 {
   "auto_open_pr": {
     "enabled": true,
-    "skip_branch_patterns": ["^\\d+\\.\\d+\\.\\d+$"],
-    "base_from_fork_point": true,
-    "base_branch_patterns": ["^\\d+\\.\\d+\\.\\d+$"]
+    "skip_branch_patterns": ["^\\d+\\.\\d+\\.\\d+$"]
   }
 }
 ```

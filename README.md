@@ -191,21 +191,20 @@ The cleanest way to avoid zombie PRs is to never create one. A common source is 
     "enabled": true,
     // Optional: branches to never open PRs for (the default branch and gh-pages are always skipped).
     "skip_branches": ["staging"],
-    // Optional: base for opened PRs (defaults to the repo's default branch).
-    "target_base": "",
     // Optional: also delete the head branch when an empty PR is closed (default off).
     "delete_branch_when_empty": false
   }
 }
 ```
 
-When a branch is ahead of its base and has no open PR, pr-minder opens one (`head` = the branch, `base` = `target_base` or the default branch, title = the branch name). It runs on two triggers:
+When a branch is ahead of its base and has no open PR, pr-minder opens one (`head` = the branch, `base` = the branch's automatically-detected fork point, title = the branch name). It runs on two triggers:
 
 - **On a push to a non-default branch** — opens the PR the moment the branch gets a commit, going forward.
 - **On install / repos-added** — sweeps existing branches once, so branches that predate the App also get PRs.
 
 Notes:
 - **Opt-in**, off by default. The default branch and `gh-pages` are always skipped; add more via `skip_branches`.
+- **The base is detected automatically — there's no setting for it.** pr-minder targets the branch each branch was **forked from**: it walks the branch's commits newest-first and takes the first ancestor that is the HEAD of any other branch (git already records where you branched off). So a branch forked from another working branch targets **that** branch, not the default branch beneath it; a branch forked off the default branch targets the default branch. The nearest fork point wins, ties prefer the default branch, and a branch with no detectable fork point falls back to the default branch. In a version-branch/archive layout this "just works" — a working branch forked from a long-lived version branch opens back into it; you only `skip_branch_patterns` the version branches so they don't each become a PR head.
 - The PR is opened by the App, so its author is the App's bot (not `github-actions[bot]`) and `auto_trigger_workflows` correctly leaves it alone — it isn't a zombie.
 - Branches with no commits ahead of base, or that already have an open PR, are skipped. A branch ahead only by squash-merged commits (no net diff) is skipped too — opening it would just create an empty PR. Fork branches aren't opened (the head must be in this repo).
 - **Empty PRs are cleaned up** (`close_when_empty`, default on). A PR opened with real changes can go content-empty later — its content lands in the base another way (a sibling branch squash-merges the same change) — and that can't be prevented at open time. pr-minder closes such PRs (with a one-line comment) once their net diff against the base is empty. It closes **any** open non-draft PR with a zero net diff, regardless of who opened it — a human's empty PR is closed too (closing is reversible: it can be reopened) — and only on an exact zero-file diff (an unknown count is left alone). Set `"close_when_empty": false` to opt out.

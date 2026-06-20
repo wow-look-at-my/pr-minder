@@ -64,7 +64,7 @@ describe('maybeDescribePr', () => {
   const makeEnv = (kv: any, over: Record<string, unknown> = {}): any =>
     ({ PR_STATE: kv, DESCRIBE_HOOK_URL: HOOK, DESCRIBE_HOOK_API_KEY: 'hook-key', PR_MINDER_PUBLIC_URL: 'https://pm.example', ...over });
   const cfg = (over: Partial<PrMinderConfig['autoDescribePr']> = {}): PrMinderConfig =>
-    ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: true, model: '', ...over } });
+    ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: true, model: '', ...over } });
   const pr = { number: 7, title: 'claude/foo-123', body: 'old human notes' };
   const DIFF = 'diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n';
 
@@ -274,7 +274,7 @@ describe('describeSafely', () => {
   }
 
   const cfg = (): PrMinderConfig =>
-    ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: true, model: '' } });
+    ({ triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: true, model: '' } });
   const pr = { number: 7, title: 't', body: 'b' };
 
   afterEach(() => vi.unstubAllGlobals());
