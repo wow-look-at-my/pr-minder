@@ -2,7 +2,7 @@
 // GitHub App must subscribe to: pull_request, pull_request_review, push
 // Also handles: installation, installation_repositories (auto-delivered to all apps)
 import { handle, startupReconcile, runRechecks, runConflictChecks, runDescribeChecks, reconcileAllInstalls } from './handlers';
-import { GhError } from './github';
+import { GhError, configureApi } from './github';
 import { Logger } from './logger';
 import { verifyWebhook } from './webhook';
 import { handleDescribeResult } from './describe-result';
@@ -31,6 +31,13 @@ export interface Env {
   // describe run is reported back and its "already described" marker cleared (the next event then
   // retries). Absent it, no callback is requested and a failed run stays recorded (original behavior).
   PR_MINDER_PUBLIC_URL?: string;
+  // Base URL for installation-token GitHub API calls (wrangler.toml [vars]). Defaults to
+  // https://api.github.com; set to the github-state-mirror proxy
+  // (https://github-state-mirror.pazer.io) to serve cached reads and transparently forward
+  // everything else. App-level JWT calls and the auto-merge GraphQL mutations always go to GitHub
+  // directly (see github.ts). When set, configureApi also wires the App credentials used to mint the
+  // X-Mirror-Identity assertion so the mirror partitions our rotating install tokens into one bucket.
+  GITHUB_API_BASE?: string;
 }
 
 // Reconcile-on-startup, not poll. Each fresh isolate (e.g. after a deploy) runs the cross-repo
@@ -42,6 +49,9 @@ let startupSwept = false;
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // Point the GitHub client at the mirror (if configured) and supply the App creds used to mint
+    // the X-Mirror-Identity assertion. Must run before any API call (incl. startupReconcile below).
+    configureApi(env.GITHUB_API_BASE, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
     if (!startupSwept) {
       startupSwept = true;
       ctx.waitUntil(startupReconcile(env, new Logger()).catch(() => {}));
@@ -98,6 +108,7 @@ export default {
   // The budgets are sized so the passes together stay under the ~50-subrequest cap of a single
   // invocation (runRechecks is self-limiting — only deferred fresh commits — so it has no fixed one).
   async scheduled(_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    configureApi(env.GITHUB_API_BASE, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
     const log = new Logger();
     await runRechecks(env, log);
     await runConflictChecks(env, log, { calls: 12 });

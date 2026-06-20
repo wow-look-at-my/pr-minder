@@ -62,3 +62,10 @@ DESCRIBE_HOOK_URL = "https://hooks.pazer.io/hook/pr-describe"
 # Committed here in [vars] for the same reason as DESCRIBE_HOOK_URL (a dashboard var evaporates on
 # the next deploy). If absent, no callback is requested and a failed run stays recorded as before.
 PR_MINDER_PUBLIC_URL = "https://pr-minder.pazer.workers.dev"
+# Base URL for installation-token GitHub API calls. Points at the github-state-mirror proxy, which
+# serves cached reads (org PR/label/status data, PR files, compare) from its webhook-fed SQLite
+# cache and transparently forwards everything else to api.github.com. pr-minder sends its App JWT
+# in X-Mirror-Identity so the mirror partitions our hourly-rotating installation tokens into one
+# stable, warm cache bucket. App-level JWT endpoints and the auto-merge GraphQL mutations still go
+# to api.github.com directly (see github.ts). To revert, set this back to https://api.github.com.
+GITHUB_API_BASE = "https://github-state-mirror.pazer.io"
