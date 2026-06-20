@@ -2,5 +2,63 @@ name = "pr-minder"
 main = "src/worker.ts"
 compatibility_date = "2026-04-19"
 
+# Custom build step. wrangler runs this before bundling on `dev`, `deploy`, and in Cloudflare
+# Workers Builds — and a non-zero exit aborts the build/deploy. `npm run build` is
+# `npm run typecheck && npm run build:docs`, so a type error fails EVERY build path (there is no
+# way to build or deploy with type errors), and only then are the docs sources gzipped. The Worker
+# imports the .gz blobs (Data -> ArrayBuffer) and serves them pre-compressed; nothing binary is
+# committed. (esbuild — what wrangler bundles with — strips types without checking, so tsc is the
+# only thing standing between a type error and production; that's why it lives in the build command.)
+[build]
+command = "npm run build"
+
+[[rules]]
+type = "Data"
+globs = ["**/*.gz"]
+fallthrough = true
+
+# Re-check sweep. Not a poll over all PRs: the handler reads only the `recheck:` reminders that
+# reviveIfZombie leaves for a follow-up commit too fresh to judge when its webhook arrived, so an
+# empty run is one KV list and zero GitHub calls. It exists because webhooks don't re-fire on their
+# own once a commit has aged past the "is its CI here yet?" window.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[observability]
+enabled = true
+
+[observability.traces]
+enabled = true
+
+# State for the zombie check: per-PR "already checked at this commit" markers and a per-repo
+# backfill flag. Lets the check run at most once per PR per commit, and sweep an already-installed
+# repo's existing PRs exactly once (on its first webhook) — no polling, no cron.
+[[kv_namespaces]]
+binding = "PR_STATE"
+id = "ea2e44bf827043c68f96dfc098f0a744"
+
+# Deploy version id ({ id, tag, timestamp }); keys the once-per-deploy gate on the startup
+# auto-merge reconcile so a redeploy triggers the sweep exactly once across all edge isolates.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
 [vars]
-GITHUB_APP_ID = "123456"
+GITHUB_APP_ID = "3433933"
+# auto_describe_pr: the pr-describe webhook (wow-look-at-my/webhooks, run by webhook-runner)
+# does the slow LLM call and PATCHes the PR — the model call outlives the Worker's ~30s
+# post-response grace, so it can't run here. DESCRIBE_HOOK_URL is the full hook URL on the
+# runner's public (tunnel) hostname; the DESCRIBE_HOOK_API_KEY secret (wrangler secret put)
+# must equal the hook's api_key (committed in plaintext in the webhooks repo's
+# pr-describe/hook.json). The URL lives HERE and not as a dashboard var on purpose: each
+# deploy replaces the script's plain vars with this [vars] block, so a dashboard-only var
+# silently evaporates on the next merge to master. If auto_describe_pr is enabled in config
+# while this var is missing, pr-minder reports the misconfiguration as a comment on the PR —
+# never a silent skip. The model endpoint/key live with the webhook, not this Worker; a
+# per-repo config can still override the model (auto_describe_pr.model).
+DESCRIBE_HOOK_URL = "https://hooks.pazer.io/hook/pr-describe"
+# The Worker's own public URL. pr-minder passes "{this}/_describe-result" to the pr-describe
+# webhook so a terminally failed describe run is reported back and the diff's "already described"
+# marker cleared, letting the next event retry (the marker is recorded optimistically on hand-off).
+# Committed here in [vars] for the same reason as DESCRIBE_HOOK_URL (a dashboard var evaporates on
+# the next deploy). If absent, no callback is requested and a failed run stays recorded as before.
+PR_MINDER_PUBLIC_URL = "https://pr-minder.pazer.workers.dev"

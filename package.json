@@ -5,16 +5,18 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:docs": "node scripts/build-docs.mjs",
+    "build": "npm run typecheck && npm run build:docs",
+    "test": "npm run typecheck && vitest run"
   },
   "dependencies": {
     "strip-json-comments": "^5.0.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260418.1",
-    "vitest": "^2.1.0",
+    "vitest": "^4.1.4",
     "typescript": "^5.4.5",
-    "wrangler": "^3.57.0"
+    "wrangler": "^4.83.0"
   }
 }

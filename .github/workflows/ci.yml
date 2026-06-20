@@ -7,11 +7,15 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      # `npm test` is `tsc --noEmit && vitest run` and `npm run build` is `tsc --noEmit &&
+      # npm run build:docs` — typecheck is baked into both, so neither tests nor the build can
+      # pass with a type error (esbuild, which vitest and wrangler bundle with, strips types
+      # without checking). Building here also exercises the exact command wrangler runs on deploy.
       - run: npm test
-      - run: npm run typecheck
+      - run: npm run build

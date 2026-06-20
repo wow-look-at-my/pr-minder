@@ -1,0 +1,216 @@
+# pr-minder
+
+> pr-minder is a GitHub App (running as a Cloudflare Worker) that keeps pull requests healthy with zero per-repo workflow files. It keeps PR branches up to date with their base, syncs labels with GitHub's native auto-merge, flags PRs that have merge conflicts with a label, revives "zombie" PRs whose CI never ran, opens PRs for forgotten branches, and can write PR titles and descriptions from the diff with an AI model. It is opt-in and event-driven, with a lightweight periodic sweep that re-checks only the PRs it has explicitly flagged — deferred zombie re-checks and pending merge-conflict re-checks — plus an auto-merge backstop (no work, and no GitHub calls, when nothing is pending). It keeps a little dedup state (which PRs it has already checked) in Workers KV.
+
+## Install
+
+Install the GitHub App here: https://github.com/apps/pr-minder/installations/new
+
+Pick "All repositories" or a selected set. pr-minder does nothing until you add a config file, so installing it is safe — every behavior is opt-in.
+
+## How it works
+
+pr-minder receives GitHub webhooks (`pull_request`, `pull_request_review`, `push`, `installation`, `installation_repositories`). For each event it verifies the signature, mints a short-lived installation token, loads your config, and takes the configured actions through the GitHub REST and GraphQL APIs. There is no stored state.
+
+Because it acts with the App's own credentials (not a workflow's default `GITHUB_TOKEN`), the PRs it creates and reopens trigger their workflows normally — which is the basis of the zombie-PR features below.
+
+## Configuration
+
+Config files are JSONC — `//` line comments and `/* */` block comments are allowed.
+
+pr-minder resolves config in this order (first match wins):
+
+1. `<repo>/.github/config/pr-minder/pr-minder.jsonc` — per-repo config (highest priority).
+2. `<org>/.github` repo, at `.github/config/pr-minder/pr-minder.jsonc` (the same path) — org-wide defaults. Per-repo overrides go under `repos.<repo-name>`; top-level keys are the org default.
+3. No config found — everything is disabled.
+
+Config is cached for up to 60 seconds, so an edit can take about a minute to take effect.
+
+Add the schema for editor validation and autocomplete:
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json"
+}
+```
+
+There is no global "enabled" switch. A feature is on only when its section is present and configured; "disable" means removing the section (or setting `auto_open_pr.enabled` / `auto_trigger_workflows` to `false`, or leaving `auto_update_pr.triggers` empty).
+
+### auto_update_pr — keep PR branches up to date
+
+`auto_update_pr.triggers` is a list of condition objects. When **any** condition is satisfied, pr-minder updates the PR branch with its base (GitHub's "Update branch"). Keys **within** one condition are ANDed; multiple conditions in the array are ORed. Updating is re-evaluated on PR events, on approving reviews, and on every push to the default branch.
+
+| Key | Meaning |
+|-----|---------|
+| `label` | PR has this label. |
+| `approved_by` | PR is approved by at least one of these usernames. |
+| `min_approvals` | PR has at least this many approvals (from anyone). |
+
+```jsonc
+{
+  "auto_update_pr": {
+    "triggers": [
+      { "label": "automerge" },
+      { "approved_by": ["alice", "bob"], "min_approvals": 2 }
+    ]
+  }
+}
+```
+
+### auto_label_pr — labels, auto-update, and auto-merge
+
+A map of label name to per-label settings:
+
+| Field | Meaning |
+|-------|---------|
+| `auto_add` | `"on_pr_creation"` applies the label when a PR is opened; `false` (default) disables. |
+| `create_label_if_missing_in_repo` | `true` creates the label in the repo (using `color`) if it doesn't exist. |
+| `color` | 6-digit hex, with or without a leading `#` (default `00FF00`). |
+| `mode` | `"auto_update"`: keep the PR branch in sync with base whenever this label is present. `"auto_merge"`: bidirectionally sync this label with GitHub's native auto-merge. `"merge_conflict"`: pr-minder adds this label when the PR has a merge conflict and removes it when the conflict is resolved (see below). |
+| `auto_merge_method` | `"merge"`, `"squash"` (default), or `"rebase"`. Only used with `mode: "auto_merge"`. |
+
+With `mode: "auto_merge"`, adding the label arms GitHub's native auto-merge and removing it disarms it; toggling auto-merge from the GitHub UI adds/removes the label to match. Whenever GitHub won't arm native auto-merge, pr-minder merges the PR directly using `auto_merge_method` — this covers both an already-mergeable PR (GitHub refuses auto-merge on a "clean" PR) and a repo that hasn't enabled "Allow auto-merge" in its settings, so the label still merges your PRs there. Branch protection still gates every merge, and a PR that isn't mergeable yet is left untouched. (For the "wait for checks, then merge" behavior in a repo without native auto-merge, enable "Allow auto-merge" in the repo's Settings; pr-minder uses native auto-merge whenever the repo allows it.)
+
+Day to day this is driven by the `labeled` webhook, so it acts the moment you add the label. As a safety net (not a poll), pr-minder also runs a backstop that **searches your whole installation for labeled-but-unarmed PRs** and arms (or merges) them: on startup after each redeploy, every few minutes on a schedule, and shortly after each webhook. Because it searches by label, its cost scales with the number of labeled PRs, not the number of repos — so it stays cheap across large installations. A PR labeled while an older version was running, or one whose webhook was somehow missed, gets healed automatically within a few minutes.
+
+```jsonc
+{
+  "auto_label_pr": {
+    "automerge": { "mode": "auto_merge", "auto_merge_method": "squash", "create_label_if_missing_in_repo": true, "color": "0e8a16" },
+    "auto-update": { "mode": "auto_update", "auto_add": "on_pr_creation", "create_label_if_missing_in_repo": true }
+  }
+}
+```
+
+### merge_conflict label — flag PRs that have conflicts
+
+A label with `mode: "merge_conflict"` is managed entirely by pr-minder: it **adds the label when a PR has a merge conflict** with its base and **removes it once the conflict is resolved**. Don't add or remove the label by hand. Opt-in — there is no such label unless you configure one.
+
+```jsonc
+{
+  "auto_label_pr": {
+    "merge-conflict": { "mode": "merge_conflict", "create_label_if_missing_in_repo": true, "color": "d73a4a" }
+  }
+}
+```
+
+A PR can become conflicted when its own head changes or when its base advances, and both are covered: the PR's `opened` / `reopened` / `synchronize` events re-check it immediately, and a push to the default branch flags every open PR for a re-check (any of them may now conflict). On install — and the first time pr-minder sees an already-installed repo — it flags the existing open PRs too.
+
+GitHub computes mergeability **asynchronously** and emits no webhook with the result, so right after a base/head move it briefly reports "unknown". pr-minder handles this by flagging the PR and settling the label from the periodic sweep once the answer is ready (usually within a few minutes) — so the label can lag a base change slightly but always converges. Mergeability reflects **conflicts only** (not failing checks or missing reviews), so the label means exactly "this needs a rebase/merge". Draft PRs are not labeled.
+
+### auto_trigger_workflows — revive "zombie" PRs
+
+`auto_trigger_workflows` is a boolean (default `false`).
+
+A PR created with a workflow's default `GITHUB_TOKEN` (author `github-actions[bot]`) never triggers its own workflows — GitHub suppresses those runs to prevent recursion — so it sits open with no CI and can never go green. pr-minder revives these by closing and reopening the PR with its own App credentials, which fires a fresh event that runs the workflows for real. It only ever acts on PRs authored by `github-actions[bot]` (the kind that can be a `GITHUB_TOKEN` zombie).
+
+It checks each PR **at most once per commit**, remembering what it has seen in Workers KV (keyed by the PR's head commit): a PR is only evaluated when its current commit hasn't been checked before, so an untouched PR is never re-checked, while new commits (a "touched" PR) are. When does it check?
+
+- **Live events** — a PR being opened, reopened, or pushed to (`synchronize`) is checked immediately.
+- **First time it sees a repo** — on the first webhook of any kind from a repo, it checks that repo's existing open PRs once. This is what revives zombies in repos that were *already* installed before the feature existed (GitHub never re-sends their install event), with no reinstall needed — the repo's next bit of activity heals it.
+- **On install / adding repos** — it checks the open PRs in the repos being added.
+- **A short safety sweep (every few minutes)** — a brand-new commit that has no workflow runs *yet* is ambiguous (its CI may simply not have registered), so pr-minder waits about a minute before deciding. It flags only that specific PR and a periodic sweep re-checks it once it has aged: if CI showed up it does nothing; if the commit is a genuine zombie it revives it. The sweep does no work and makes no GitHub calls when nothing is flagged. This is also what keeps pr-minder's own branch-update merge from being treated as a zombie.
+
+It will not loop: pr-minder's own reopen comes back as a `reopened` event sent by a bot, which is skipped.
+
+```jsonc
+{ "auto_trigger_workflows": true }
+```
+
+### auto_open_pr — open PRs for forgotten branches
+
+`auto_open_pr` opens a PR for any branch that is ahead of its base and has no open PR, **using pr-minder's App credentials** so the PR triggers its workflows normally (it is never a zombie). This is the root-cause fix for the "a CI job opened a PR with `GITHUB_TOKEN` and CI never ran" problem.
+
+| Field | Meaning |
+|-------|---------|
+| `enabled` | Turn the feature on (default `false`). |
+| `skip_branches` | Extra branch names (exact match) to never open PRs for. The default branch and `gh-pages` are always skipped. |
+| `skip_branch_patterns` | Extra branches to never open PRs for, as regex patterns matched against the branch name (anchor with `^...$`). Excludes a whole family at once — e.g. `["^\\d+\\.\\d+\\.\\d+$"]` keeps version branches like `2.1.81` from each becoming a PR head. A malformed pattern simply never matches. |
+| `target_base` | Base branch for opened PRs (default: the repo's default branch). When `base_from_fork_point` is on, this is the fallback used when no fork point is detected. |
+| `base_from_fork_point` | Detect each branch's base from its **fork point** instead of always using `target_base` (default `false`). |
+| `base_branch_patterns` | When `base_from_fork_point` is on, which non-default branches may be selected as a base (regex patterns). The default branch always qualifies. |
+| `close_when_empty` | Close **any** open PR with a zero net diff against the base, regardless of who opened it (default `true`). See below. |
+| `delete_branch_when_empty` | When `close_when_empty` closes a content-empty PR, also delete its head branch (default `false`). See below. |
+
+It runs on a push to a non-default branch (opening the PR as soon as the branch gets a commit) and sweeps existing branches once when the App is installed or repositories are added. Fork branches are not opened.
+
+**Closing content-empty PRs (`close_when_empty`, default on).** A 0-diff PR — no net change against its base — has nothing to review or merge and only wastes CI on each update, so pr-minder **closes** it. It doesn't matter how the PR became empty (a squash-merge orphan that's ahead by commit count but has no net content, or a PR opened with real changes whose content later landed in the base another way) or **who opened it** — a human's empty PR is closed too (closing is reversible: it can be reopened). For each open non-draft PR it closes — with a one-line comment — only when the net diff against the base is exactly zero (an unknown/omitted file count is left alone). This runs when the default branch advances (a push to it) and on the install/backfill sweeps. Set `close_when_empty: false` to opt out.
+
+**Deleting the branch too (`delete_branch_when_empty`, default off).** When `close_when_empty` closes a content-empty PR, pr-minder can also delete that PR's head branch, so closed branches don't pile up. The branch is content-identical to its base (zero net diff), so deleting it loses nothing. Only a branch **in this repository** is deleted — a fork PR's head branch (which lives in the fork, and which pr-minder can't write to) is left untouched — and GitHub itself refuses to delete the default or a protected branch. It has no effect unless `close_when_empty` is also on, and is off by default because deleting a branch is the one part of the empty-PR cleanup that isn't trivially reversible. Set `delete_branch_when_empty: true` to enable.
+
+**Fork-point base detection.** With `base_from_fork_point: true`, pr-minder picks the base by walking the branch's commits newest-first and taking the first ancestor that is the HEAD of another *qualifying* branch — the default branch, or one matching `base_branch_patterns`. This suits an archive/version-branch layout: an investigation branch forked from a long-lived version branch (whose tip never moves, so it *is* the fork point) is opened back into that version branch, while a branch forked off the default branch goes into the default branch. When no qualifying fork point is found it falls back to `target_base` (or the default branch).
+
+```jsonc
+{
+  "auto_open_pr": {
+    "enabled": true,
+    "skip_branches": ["staging"],
+    "target_base": ""
+  }
+}
+```
+
+Archive-repo example — open each working branch back into the version branch it forked from, and never open a PR from a version branch itself:
+
+```jsonc
+{
+  "auto_open_pr": {
+    "enabled": true,
+    "skip_branch_patterns": ["^\\d+\\.\\d+\\.\\d+$"],
+    "base_from_fork_point": true,
+    "base_branch_patterns": ["^\\d+\\.\\d+\\.\\d+$"]
+  }
+}
+```
+
+### auto_describe_pr — AI-written titles and descriptions
+
+`auto_describe_pr` generates a PR's title and description from its **entire** diff (base...head, not just the latest push) with an AI model, whenever a PR is opened or marked ready for review, and again on every new commit.
+
+| Field | Meaning |
+|-------|---------|
+| `enabled` | Turn the feature on (default `false`). |
+| `model` | Optional model-name override; defaults to the model configured on the describe webhook. |
+
+- The **description is rewritten** each time the diff changes. The existing description is given to the model, which carries forward any of its information that is still accurate — human-written notes survive.
+- The **title is replaced only** when the existing one is a missing/autogenerated placeholder (branch-name junk, "update", ticket-only titles). A real title is left alone.
+- Draft PRs are skipped until they're marked ready for review.
+- A PR with **no net diff** (nothing for the model to describe — typically an auto-opened branch whose content already lives in the base) is titled `[zero diff] <branch>` instead of being skipped silently, so it never sits with its raw branch name as the title. Only pr-minder's own auto-opened PRs are *relabeled* this way — a human's title is never rewritten — and the marking is idempotent. (Closing an empty PR via `auto_open_pr.close_when_empty`, on by default, applies to *any* author's 0-diff PR — closing is reversible, a title rewrite is not.) A later non-empty commit re-describes normally.
+- The work is deduped on a hash of the diff, so a commit that doesn't change the PR's effective diff (e.g. pr-minder's own branch-update merge) costs no model call. It can't loop: editing a PR's text isn't an event pr-minder reacts to.
+- The slow model call doesn't run in the worker (real LLM calls outlive its time limits): the worker hands the diff to an internal webhook, fire-and-forget, which calls the model — retrying transient failures itself — and edits the PR. If newer commits arrive while a run is still in flight, the stale run is cancelled so descriptions can't land out of order.
+- The webhook endpoint and its key are configured on the worker by whoever operates it; the model endpoint/key live with the webhook. Neither appears in repo config.
+- **Failures are never silent — and never public.** If the feature is enabled but misconfigured (no webhook URL on the worker), or the hand-off fails (bad key, webhook down), pr-minder logs the error at error level for the operator (and the internal webhook runner's dashboard shows everything that reaches it: denied requests, failed runs). Nothing is ever posted on the PR; an enabled feature never silently does nothing.
+
+```jsonc
+{
+  "auto_describe_pr": { "enabled": true }
+}
+```
+
+## Org-wide config with per-repo overrides
+
+In the `<org>/.github` repo at `.github/config/pr-minder/pr-minder.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
+  "auto_update_pr": { "triggers": [{ "label": "automerge" }] },
+  "auto_trigger_workflows": true,
+  "repos": {
+    "special-repo": {
+      "auto_update_pr": { "triggers": [{ "label": "ready-to-merge" }] }
+    },
+    "opt-out-repo": {
+      "auto_update_pr": { "triggers": [] }
+    }
+  }
+}
+```
+
+In overrides, `auto_update_pr` replaces the parent's entirely; `auto_label_pr` and `auto_open_pr` merge field-by-field.
+
+## Links
+
+- Install: https://github.com/apps/pr-minder/installations/new
+- Source code: https://github.com/wow-look-at-my/pr-minder
+- Config JSON Schema: https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json

@@ -2,25 +2,31 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/wow-look-at-my/pr-minder/master/schema/pr-minder.schema.json",
   "title": "pr-minder config",
-  "description": "Configuration for the pr-minder GitHub App. Supports JSONC (comments allowed). Place at .github/pr-minder.json in any repo, or at pr-minder.json in the org's .github repo (with optional per-repo overrides under 'repos').",
-  "$ref": "#/$defs/baseConfig",
+  "description": "Configuration for the pr-minder GitHub App. Supports JSONC (comments allowed). Place at .github/config/pr-minder/pr-minder.jsonc in any repo, or at the same path in the org's .github repo (with optional per-repo overrides under 'repos').",
+  "type": "object",
+  "additionalProperties": false,
   "properties": {
     "$schema": {
+      "description": "URL to this JSON Schema. Used by IDEs for validation and autocomplete.",
       "type": "string"
     },
+    "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
+    "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" },
+    "auto_trigger_workflows": { "$ref": "#/$defs/autoTriggerWorkflows" },
+    "auto_open_pr": { "$ref": "#/$defs/autoOpenPr" },
+    "auto_describe_pr": { "$ref": "#/$defs/autoDescribePr" },
     "repos": {
-      "description": "Per-repo config overrides. Only meaningful in the org-level .github/pr-minder.json; ignored in per-repo config files.",
+      "description": "Per-repo config overrides. Only meaningful in the org-level .github/config/pr-minder/pr-minder.jsonc; ignored in per-repo config files.",
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/repoConfig" }
     }
   },
-  "unevaluatedProperties": false,
   "$defs": {
     "triggerCondition": {
       "description": "A single trigger condition. All specified keys must match (AND). Multiple conditions in the triggers array are ORed.",
       "type": "object",
       "minProperties": 1,
-      "unevaluatedProperties": false,
+      "additionalProperties": false,
       "properties": {
         "label": {
           "description": "PR must have this label.",
@@ -40,25 +46,139 @@
         }
       }
     },
-    "baseConfig": {
+    "autoUpdatePr": {
+      "description": "Approval-gate settings for branch updates. Any passing condition fires update-branch.",
       "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "description": "Disable pr-minder entirely for this repo.",
-          "type": "boolean",
-          "default": true
-        },
         "triggers": {
-          "description": "List of trigger conditions. Any passing condition fires a branch update (OR). Keys within a condition are ANDed.",
+          "description": "List of trigger conditions (ORed). Keys within a condition are ANDed.",
           "type": "array",
           "items": { "$ref": "#/$defs/triggerCondition" }
         }
       }
     },
+    "autoTriggerWorkflows": {
+      "description": "Re-trigger CI for 'zombie' PRs that have no workflow runs of their own. A PR created with the default GITHUB_TOKEN (author github-actions[bot]) never triggers its workflows (GitHub suppresses recursive runs); on the `opened` event pr-minder revives those. On the `reopened` event it revives any open PR that still has zero workflow runs, whatever its author. The fix is a close+reopen with the App's own credentials, which fires a fresh `pull_request.reopened` event that runs the workflows. Opt-in; defaults to false.",
+      "type": "boolean",
+      "default": false
+    },
+    "autoOpenPr": {
+      "description": "Automatically open a pull request for any branch that is ahead of its base and has no open PR. PRs are opened with pr-minder's own App credentials, so (unlike PRs created by a workflow's default GITHUB_TOKEN) they trigger their workflows normally and are never 'zombie' PRs. Fires on a push to a non-default branch, and sweeps existing branches when the App is installed or repositories are added. The default branch and gh-pages are always skipped. The base is target_base (or the default branch) unless base_from_fork_point is enabled, which instead targets the branch each branch was forked from.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Turn the feature on. Opt-in; defaults to false.",
+          "type": "boolean",
+          "default": false
+        },
+        "skip_branches": {
+          "description": "Additional branch names (exact match) to never open PRs for. The default branch and gh-pages are always skipped regardless.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "skip_branch_patterns": {
+          "description": "Additional branches to never open PRs for, as regular-expression patterns matched against the branch name (anchor with ^...$ for a full-name match). Use this to exclude a whole family of branches at once — e.g. [\"^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$\"] excludes version branches like 2.1.81, so they never each become a PR head. A malformed pattern simply never matches.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "target_base": {
+          "description": "Base branch for opened PRs. Defaults to the repository's default branch. When base_from_fork_point is enabled this is the fallback base used when no fork point is detected.",
+          "type": "string"
+        },
+        "base_from_fork_point": {
+          "description": "Detect each branch's base from its fork point instead of always using target_base: pr-minder walks the branch's commits newest-first and uses the first ancestor that is the HEAD of another qualifying branch (the default branch, or one matching base_branch_patterns). In an archive repo a working branch forked from a long-lived branch (e.g. a version branch) is opened back into that branch; a branch forked off the default branch goes into the default branch. Falls back to target_base when no qualifying fork point is found. Opt-in; defaults to false.",
+          "type": "boolean",
+          "default": false
+        },
+        "base_branch_patterns": {
+          "description": "When base_from_fork_point is enabled, which non-default branches may be selected as a base, as regular-expression patterns matched against the branch name. The repository's default branch always qualifies; a non-default branch qualifies only if it matches one of these. E.g. [\"^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$\"] lets version branches be auto-detected bases.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "close_when_empty": {
+          "description": "Close any open non-draft PR whose net diff against its base is zero (no changed files), regardless of who opened it — a 0-diff PR has nothing to review or merge and only wastes CI on each update. It doesn't matter how the PR became empty (a squash-merge orphan that's ahead by commit count but has no net content, a PR whose change landed in the base another way, etc.) or who authored it; a human's empty PR is closed too (closing is reversible — it can be reopened). Only an EXACTLY-zero changed-files count closes a PR; an unknown count (GitHub omitted the file list) is left alone. Runs when the default branch advances (a push to it) and on the install/backfill sweeps. Defaults to true.",
+          "type": "boolean",
+          "default": true
+        },
+        "delete_branch_when_empty": {
+          "description": "When closing a content-empty PR (see close_when_empty), also delete its head branch, so closed branches don't pile up. The branch is content-identical to its base (zero net diff), so deleting it loses nothing. Only branches in this repository are deleted — a fork PR's head branch (which lives in the fork) is left untouched — and GitHub itself refuses to delete the default or a protected branch. Has no effect unless close_when_empty is also on. Off by default: deleting a branch is the one part of the empty-PR cleanup that isn't trivially reversible.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "autoDescribePr": {
+      "description": "Generate the PR title and description from the PR's full diff with an AI model, whenever a PR is opened (or marked ready for review) and on every new commit. The description is rewritten each time the diff changes (the existing description is passed to the model so still-accurate notes are preserved); the title is replaced only when the existing one is a missing/autogenerated placeholder. The model endpoint and credentials are configured on the Worker, not here.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Turn the feature on. Opt-in; defaults to false.",
+          "type": "boolean",
+          "default": false
+        },
+        "model": {
+          "description": "Override the default model name for this repo/org (the default is configured on the pr-describe webhook).",
+          "type": "string"
+        }
+      }
+    },
+    "labelOptions": {
+      "description": "Settings for a single label name.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_add": {
+          "description": "If 'on_pr_creation', automatically apply this label to PRs when they are opened. 'false' or omitted disables auto-add.",
+          "enum": ["on_pr_creation", false],
+          "default": false
+        },
+        "create_label_if_missing_in_repo": {
+          "description": "If true, create this label in the repo (with the configured color) if it does not already exist.",
+          "type": "boolean",
+          "default": false
+        },
+        "color": {
+          "description": "Hex color used when creating this label, with or without a leading '#'.",
+          "type": "string",
+          "pattern": "^#?[0-9a-fA-F]{6}$",
+          "default": "00FF00"
+        },
+        "mode": {
+          "description": "'auto_update': PR branch is kept in sync with its base whenever this label is present (complementary to auto_update_pr.triggers). 'auto_merge': adding/removing this label enables/disables GitHub's native auto-merge; toggling auto-merge via the GitHub UI adds/removes the label. 'merge_conflict': pr-minder applies this label to a PR when it has a merge conflict with its base, and removes it once the conflict is resolved (managed entirely by pr-minder; do not add or remove it by hand).",
+          "enum": ["auto_update", "auto_merge", "merge_conflict"]
+        },
+        "auto_merge_method": {
+          "description": "Merge method to use when enabling auto-merge. Only relevant when mode is 'auto_merge'.",
+          "enum": ["merge", "squash", "rebase"],
+          "default": "squash"
+        }
+      }
+    },
+    "autoLabelPr": {
+      "description": "Map of label name to its settings.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/labelOptions" }
+    },
     "repoConfig": {
       "description": "Per-repo overrides. Supports the same fields as the top-level config, except 'repos'.",
-      "$ref": "#/$defs/baseConfig",
-      "unevaluatedProperties": false
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "$schema": {
+          "type": "string"
+        },
+        "auto_update_pr": { "$ref": "#/$defs/autoUpdatePr" },
+        "auto_label_pr": { "$ref": "#/$defs/autoLabelPr" },
+        "auto_trigger_workflows": { "$ref": "#/$defs/autoTriggerWorkflows" },
+        "auto_open_pr": { "$ref": "#/$defs/autoOpenPr" },
+        "auto_describe_pr": { "$ref": "#/$defs/autoDescribePr" }
+      }
     }
   }
 }
