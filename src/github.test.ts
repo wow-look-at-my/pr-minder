@@ -544,4 +544,14 @@ describe('mirror routing (configureApi)', () => {
     await listInstallations('123', pem, new Logger());
     expect(fetchMock.mock.calls[0][0]).toContain('https://api.github.com/app/installations');
   });
+
+  it('keeps compare direct on api.github.com (mirror caches it lossily) and still counts files', async () => {
+    configureApi('https://mirror.example', '123', await genPrivateKeyPem());
+    const fetchMock = stubFetch(200, { ahead_by: 2, behind_by: 0, files: [{}, {}, {}] });
+    const res = await compareCommits('o/r', 'main', 'feat', 'tok', new Logger());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/o/r/compare/main...feat');
+    expect(init.headers['x-mirror-identity']).toBeUndefined();
+    expect(res?.changed_files).toBe(3); // the empty-PR gate's signal survives
+  });
 });

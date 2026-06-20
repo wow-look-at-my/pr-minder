@@ -13,6 +13,21 @@ export async function gh(path: string, token: string, log: Logger) {
   return r;
 }
 
+// ghDirect is gh() that always talks to api.github.com, bypassing the mirror.
+// Used for the two reads whose mirror-cached representation is *lossy* in a way
+// pr-minder depends on: the compare endpoint (the mirror caches ahead_by/
+// behind_by but not the `files` array, and we count it for the empty-PR gate —
+// a missing count silently fails that gate open) and the PR-files fallback (the
+// mirror caches filename/additions/deletions but not each file's `patch`, which
+// the 406 diff fallback reassembles). Both need GitHub's full response, so they
+// skip the cache. Every other read hits a path the mirror doesn't cache and so
+// is already proxied faithfully.
+async function ghDirect(path: string, token: string, log: Logger) {
+  const r = await fetch(`https://api.github.com${path}`, { headers: ghHeaders(token) });
+  if (!r.ok && r.status !== 404) log.log(`gh ${path}: ${r.status}`);
+  return r;
+}
+
 export function ghHeaders(token: string): HeadersInit {
   return {
     authorization: `Bearer ${token}`,
@@ -202,7 +217,7 @@ export async function commitAgeSeconds(repo: string, sha: string, token: string,
 // "empty". Returns null on error (caller skips). Branch names keep their slashes in the path; git
 // ref rules forbid the characters that would need encoding.
 export async function compareCommits(repo: string, base: string, head: string, token: string, log: Logger): Promise<{ ahead_by: number; behind_by: number; changed_files: number | null } | null> {
-  const r = await gh(`/repos/${repo}/compare/${base}...${head}`, token, log);
+  const r = await ghDirect(`/repos/${repo}/compare/${base}...${head}`, token, log);
   if (!r.ok) return null;
   const data: any = await r.json();
   return {
@@ -529,7 +544,7 @@ export async function getPullDiff(repo: string, num: number, token: string, log:
 async function assembleDiffFromFiles(repo: string, num: number, token: string, log: Logger): Promise<string | null> {
   const parts: string[] = [];
   for (let page = 1; ; page++) {
-    const r = await gh(`/repos/${repo}/pulls/${num}/files?per_page=100&page=${page}`, token, log);
+    const r = await ghDirect(`/repos/${repo}/pulls/${num}/files?per_page=100&page=${page}`, token, log);
     if (!r.ok) {
       log.log(`getPullDiff ${repo}#${num}: files page ${page} -> ${r.status}`);
       break;
