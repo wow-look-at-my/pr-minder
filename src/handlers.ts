@@ -1,7 +1,7 @@
 import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
 import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, closePull, commentOnPr, deleteBranch, appBotLogin, gh } from './github';
-import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, setDescribeCheck, clearDescribeCheck, listDescribeChecks, describedDiffHash, markSwept, recentlySwept } from './state';
+import { checkedSha, markChecked, backfilledCaps, markBackfilled, BACKFILL_CAPS, type BackfillCap, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, setDescribeCheck, clearDescribeCheck, listDescribeChecks, describedDiffHash, markSwept, recentlySwept } from './state';
 import { describeSafely, shouldDescribe } from './describe';
 import type { Logger } from './logger';
 
@@ -14,6 +14,18 @@ export type Defer = (work: Promise<unknown>) => void;
 // for the life of the isolate; a cold start just re-checks once, no harm.
 const labelCheckedAt = new Map<string, number>();
 const LABEL_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+
+// Per-isolate throttle for the backfill capability re-check (mirrors labelCheckedAt). Once a repo's
+// backfill set is complete it's gated by a single KV read; while it's incomplete a capability may
+// have been enabled since the last sweep, and learning that needs config (a token mint + a memoized
+// Contents read), so we re-check at most this often per isolate rather than on every event.
+const backfillCheckedAt = new Map<string, number>();
+const BACKFILL_RECHECK_INTERVAL_MS = 15 * 60 * 1000;
+
+// Test-only: clear the per-isolate backfill throttle so a test can simulate a later event/isolate.
+export function resetBackfillThrottle(): void {
+  backfillCheckedAt.clear();
+}
 
 // GitHub-call budgets for the search-based auto-merge backstop (reconcileInstall). Each unit ~= one
 // external GitHub fetch; the budget keeps a single invocation well under the 50-external-subrequest
@@ -890,23 +902,62 @@ async function maybeRetriggerZombiesForRepo(repo: string, config: PrMinderConfig
   }
 }
 
-// First-webhook backfill: the event-driven "check at least once" for repos that were already
-// installed before this feature shipped (GitHub never re-sends their install event). The first time
-// pr-minder sees any webhook from a repo, sweep its open PRs once; a KV flag makes it a one-time
-// pass, so every later event costs a single KV read. No cron, no polling. Going forward, new and
-// touched PRs are handled by the live opened/reopened/synchronize paths.
-async function maybeBackfillRepo(fullName: string, installationId: number, env: Env, log: Logger): Promise<void> {
-  if (!env.PR_STATE || (await wasBackfilled(env.PR_STATE, fullName))) return;
+// The backfill capabilities currently enabled by config. Each corresponds to one catch-up sweep in
+// maybeBackfillRepo; recording which have run (state.ts) is what lets a feature enabled AFTER the
+// first sweep still be caught up. `conflict` rides the merge_conflict label set and `describe` the
+// auto_describe_pr flag — the same gates the live paths use.
+export function enabledBackfillCaps(config: PrMinderConfig): BackfillCap[] {
+  const caps: BackfillCap[] = [];
+  if (config.autoTriggerWorkflows) caps.push('zombie');
+  if (config.autoOpenPr.enabled) caps.push('openpr');
+  if (conflictLabelNames(config).length > 0) caps.push('conflict');
+  if (config.autoDescribePr.enabled) caps.push('describe');
+  return caps;
+}
+
+// The catch-up sweeps still owed for a repo: the enabled capabilities not yet in its backfill set.
+// Empty is the steady state. Pure, so the gate decision is tested without minting a token or fetching.
+export function backfillTodo(done: Set<BackfillCap>, config: PrMinderConfig): BackfillCap[] {
+  return enabledBackfillCaps(config).filter((c) => !done.has(c));
+}
+
+// First-webhook backfill: the event-driven "check at least once" for repos already installed before a
+// feature shipped (GitHub never re-sends their install event). On a repo's first event we sweep its
+// pre-existing PRs/branches for each enabled capability and record that set in KV. Crucially the
+// record is per-capability, not a single "done" flag: a capability enabled AFTER the first backfill
+// (e.g. turning on auto_open_pr in config) is missing from the set, so a later event re-runs just that
+// catch-up. Without this, enabling a feature on an already-installed repo never swept its pre-existing
+// branches/PRs — the catch-up simply never ran. No cron, no polling; the live
+// opened/reopened/synchronize/push paths handle new and touched PRs/branches going forward.
+export async function maybeBackfillRepo(fullName: string, installationId: number, env: Env, log: Logger): Promise<void> {
+  if (!env.PR_STATE) return;
+  // Cheap permanent gate: once every capability has been backfilled, no later config change can add
+  // work, so we never touch config again — a single KV read per event.
+  const done = await backfilledCaps(env.PR_STATE, fullName);
+  if (BACKFILL_CAPS.every((c) => done.has(c))) return;
+  // Still incomplete: a capability may have been enabled since the last sweep, but learning that needs
+  // the config (a token mint + a memoized Contents read), so throttle the re-check per isolate. The
+  // first event for this repo in this isolate isn't throttled (absent from the map), so the initial
+  // backfill still runs promptly; a transient failure below just retries after the interval.
+  const now = Date.now();
+  const last = backfillCheckedAt.get(fullName);
+  if (last !== undefined && now - last < BACKFILL_RECHECK_INTERVAL_MS) return;
+  backfillCheckedAt.set(fullName, now);
   try {
     const token = await installToken(installationId, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
     const [owner, name] = fullName.split('/');
     const config = await loadConfig(owner, name, token, log);
-    await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
-    await maybeOpenPrsForRepo(fullName, config, token, log);
-    await enqueueConflictChecksForRepo(fullName, config, env, token, log);
-    await enqueueDescribeChecksForRepo(fullName, config, env, token, log);
-    await closeEmptyAutoPrs(fullName, config, token, env, log);
-    await markBackfilled(env.PR_STATE, fullName);
+    const todo = new Set(backfillTodo(done, config));
+    if (todo.size === 0) return; // nothing newly enabled since the last sweep
+    log.log(`${fullName}: backfill [${[...todo]}] (already: [${[...done]}])`);
+    if (todo.has('zombie')) await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
+    if (todo.has('openpr')) {
+      await maybeOpenPrsForRepo(fullName, config, token, log);
+      await closeEmptyAutoPrs(fullName, config, token, env, log);
+    }
+    if (todo.has('conflict')) await enqueueConflictChecksForRepo(fullName, config, env, token, log);
+    if (todo.has('describe')) await enqueueDescribeChecksForRepo(fullName, config, env, token, log);
+    await markBackfilled(env.PR_STATE, fullName, [...done, ...todo]);
   } catch (e) {
     log.log(`maybeBackfill: ${fullName}: ${(e as Error).message}`);
   }
@@ -927,7 +978,8 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
       await enqueueConflictChecksForRepo(fullName, config, env, token, log);
       await enqueueDescribeChecksForRepo(fullName, config, env, token, log);
       await closeEmptyAutoPrs(fullName, config, token, env, log);
-      if (env.PR_STATE) await markBackfilled(env.PR_STATE, fullName);
+      // Ran every sweep, so every currently-enabled capability is now backfilled for this repo.
+      if (env.PR_STATE) await markBackfilled(env.PR_STATE, fullName, enabledBackfillCaps(config));
       labelCheckedAt.set(fullName, Date.now());
     } catch (e) {
       log.log(`installation: ${fullName}: ${(e as Error).message}`);
@@ -950,7 +1002,8 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
       await enqueueConflictChecksForRepo(repo.full_name, config, env, token, log);
       await enqueueDescribeChecksForRepo(repo.full_name, config, env, token, log);
       await closeEmptyAutoPrs(repo.full_name, config, token, env, log);
-      if (env.PR_STATE) await markBackfilled(env.PR_STATE, repo.full_name);
+      // Ran every sweep, so every currently-enabled capability is now backfilled for this repo.
+      if (env.PR_STATE) await markBackfilled(env.PR_STATE, repo.full_name, enabledBackfillCaps(config));
       labelCheckedAt.set(repo.full_name, Date.now());
     } catch (e) {
       log.log(`repos_added: ${repo.full_name}: ${(e as Error).message}`);
