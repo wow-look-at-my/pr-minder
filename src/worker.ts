@@ -1,7 +1,7 @@
 // MIT
 // GitHub App must subscribe to: pull_request, pull_request_review, push
 // Also handles: installation, installation_repositories (auto-delivered to all apps)
-import { handle, startupReconcile, runRechecks, runConflictChecks, reconcileAllInstalls } from './handlers';
+import { handle, startupReconcile, runRechecks, runConflictChecks, runDescribeChecks, reconcileAllInstalls } from './handlers';
 import { GhError } from './github';
 import { Logger } from './logger';
 import { verifyWebhook } from './webhook';
@@ -82,23 +82,27 @@ export default {
     return new Response(log.toString() || 'ok', { status, headers: { 'content-type': 'text/plain' } });
   },
 
-  // Cron entry point ([triggers] crons in wrangler.toml). Three cheap passes:
+  // Cron entry point ([triggers] crons in wrangler.toml). Four cheap passes:
   //  1) runRechecks — drains the `recheck:` reminders reviveIfZombie leaves for follow-up commits
   //     too fresh to judge when their webhook arrived. With no reminders it's a single KV list.
   //  2) runConflictChecks — drains the `conflict:` reminders that base/head moves left behind,
   //     settling each PR's merge_conflict label once GitHub has computed mergeability. Also a single
   //     KV list when nothing is pending; budget-bounded otherwise.
-  //  3) reconcileAllInstalls — the auto-merge backstop: per installation, search for auto_merge-
+  //  3) runDescribeChecks — drains the `describe:` reminders the auto_describe_pr backfill left, so a
+  //     never-described PR (opened before the feature/install, or a failed opened-event hand-off)
+  //     gets described. A single KV list when nothing is pending; budget-bounded otherwise.
+  //  4) reconcileAllInstalls — the auto-merge backstop: per installation, search for auto_merge-
   //     labeled PRs and arm/merge any the live webhook path dropped. Cost scales with labeled PRs
   //     (a search + a couple calls each), not repo count, and is budget-bounded so it stays well
   //     under the subrequest cap; owners not reached this tick are picked up on the next.
-  // The budgets are sized so the three passes together stay under the ~50-subrequest cap of a single
+  // The budgets are sized so the passes together stay under the ~50-subrequest cap of a single
   // invocation (runRechecks is self-limiting — only deferred fresh commits — so it has no fixed one).
   async scheduled(_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     const log = new Logger();
     await runRechecks(env, log);
-    await runConflictChecks(env, log, { calls: 15 });
-    await reconcileAllInstalls(env, log, { calls: 30 });
+    await runConflictChecks(env, log, { calls: 12 });
+    await runDescribeChecks(env, log, { calls: 10 });
+    await reconcileAllInstalls(env, log, { calls: 26 });
   },
 };
 
