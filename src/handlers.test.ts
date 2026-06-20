@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, maybeOpenPrForBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile, conflictLabelNames, closeEmptyAutoPrs } from './handlers';
+import { handle, conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, maybeOpenPrForBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile, conflictLabelNames, closeEmptyAutoPrs } from './handlers';
 import { Logger } from './logger';
 import { resetConfigCache, type PrMinderConfig } from './config';
 
@@ -747,4 +747,41 @@ describe('closeEmptyAutoPrs', () => {
     await closeEmptyAutoPrs('o/r', cfg({ enabled: false }), 'tok', env(), new Logger());
     expect(fn).not.toHaveBeenCalled();
   });
+});
+
+describe('handle: event-type gate', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  // Env whose GitHub access (fetch) and KV access are spies that MUST stay untouched for a dropped
+  // event — proving the gate short-circuits before any token mint, KV read, or the auto-merge backstop.
+  function spyEnv() {
+    const kvGet = vi.fn(async () => null);
+    const kvPut = vi.fn(async () => {});
+    const env = {
+      GITHUB_APP_ID: 'id',
+      GITHUB_APP_PRIVATE_KEY: 'key',
+      PR_STATE: { get: kvGet, put: kvPut, delete: vi.fn(async () => {}) },
+    } as any;
+    return { env, kvGet, kvPut };
+  }
+
+  // workflow_job / workflow_run (and most other events) carry repository + installation.id — the exact
+  // shape that used to slip through to the opportunistic per-repo work and the auto-merge backstop.
+  const ciPayload = () => ({ repository: { full_name: 'o/r' }, installation: { id: 123 }, action: 'completed' });
+
+  for (const event of ['workflow_job', 'workflow_run', 'ping', 'check_run', null]) {
+    it(`drops ${event} without minting a token, touching KV, or running the backstop`, async () => {
+      const fetchSpy = vi.fn(async () => { throw new Error('unexpected fetch'); });
+      vi.stubGlobal('fetch', fetchSpy);
+      const { env, kvGet, kvPut } = spyEnv();
+      const log = new Logger();
+
+      await handle(event as any, ciPayload(), env, log);
+
+      expect(fetchSpy).not.toHaveBeenCalled(); // no token mint, no backstop search
+      expect(kvGet).not.toHaveBeenCalled();    // no recentlySwept / backfill KV read
+      expect(kvPut).not.toHaveBeenCalled();
+      expect(log.toString()).toContain('unhandled event type');
+    });
+  }
 });
