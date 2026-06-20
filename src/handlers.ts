@@ -416,13 +416,18 @@ function buildTipMap(heads: { name: string; sha: string }[]): Map<string, string
 }
 
 // Pick the base for a branch from its fork point: walk the branch's commits newest-first and return
-// the first ancestor that is the HEAD of another *qualifying* branch — the repo default branch, or a
-// non-default branch matching one of baseBranchPatterns. In an archive repo a working branch is
-// forked from a long-lived branch (e.g. a version branch) whose tip never moves, so that tip is
-// exactly the fork point and names the base the work should merge back into. `ahead` is how many
-// commits the branch adds on top of that base (its index in the commit list). Returns null when no
-// qualifying ancestor is found, so the caller falls back to the default base. tipsBySha comes from
-// buildTipMap; the branch's own name is excluded so it can't pick itself.
+// the first ancestor that is the HEAD of another *qualifying* branch — that branch is where this
+// branch was forked from, and so where its PR should merge back into. **By default (no
+// baseBranchPatterns) ANY other branch qualifies**, so a branch is routed to whatever branch it was
+// actually forked from — a branch forked off another working branch targets that working branch, not
+// the default branch beneath it. The nearest such ancestor wins (the most specific fork point). When
+// baseBranchPatterns IS configured it becomes a restriction: only the default branch or a
+// pattern-matching branch may be a base (the archive/version-branch opt-in, where a working branch
+// forked from a long-lived version branch opens back into it). Among branches sharing the fork-point
+// commit (the same commit, so interchangeable as a base) the default branch is preferred. `ahead` is
+// how many commits the branch adds on top of that base (its index in the commit list). Returns null
+// when no qualifying ancestor is found, so the caller falls back to the default base. tipsBySha comes
+// from buildTipMap; the branch's own name is excluded so it can't pick itself.
 export async function detectForkBase(
   repo: string,
   branch: string,
@@ -432,21 +437,23 @@ export async function detectForkBase(
   token: string,
   log: Logger,
 ): Promise<{ base: string; ahead: number } | null> {
+  const qualifies = (n: string) =>
+    n !== branch &&
+    (baseBranchPatterns.length === 0 || n === defaultBranch || baseBranchPatterns.some((p) => matchesPattern(n, p)));
   const commits = await listCommitShas(repo, branch, token, log);
   for (let i = 0; i < commits.length; i++) {
-    const names = tipsBySha.get(commits[i]);
-    if (!names) continue;
-    const base = names.find((n) => n !== branch && (n === defaultBranch || baseBranchPatterns.some((p) => matchesPattern(n, p))));
-    if (base) return { base, ahead: i };
+    const names = (tipsBySha.get(commits[i]) ?? []).filter(qualifies);
+    if (names.length === 0) continue;
+    return { base: names.includes(defaultBranch) ? defaultBranch : names[0], ahead: i };
   }
   return null;
 }
 
-// Open a PR for one branch into its base, when it's ahead and has no open PR. The base is targetBase
-// (or the repo default) unless base_from_fork_point is on, in which case it's detected from the
-// branch's fork point (see detectForkBase), falling back to the default base. tipsBySha is built once
-// by the caller for a sweep; for a single push it's built here on demand (only when fork-point
-// detection is enabled).
+// Open a PR for one branch into its base, when it's ahead and has no open PR. With base_from_fork_point
+// on (the default) the base is detected from the branch's fork point — the branch it was created from
+// (see detectForkBase) — falling back to targetBase (or the repo default) when none is found; with it
+// off the base is always targetBase (or the repo default). tipsBySha is built once by the caller for a
+// sweep; for a single push it's built here on demand (only when fork-point detection is enabled).
 export async function maybeOpenPrForBranch(repo: string, branch: string, defaultBase: string, config: PrMinderConfig, token: string, log: Logger, tipsBySha?: Map<string, string[]>): Promise<void> {
   const tag = `${repo}@${branch}`;
   const ao = config.autoOpenPr;

@@ -95,7 +95,7 @@
           "default": true
         },
         "base_branch_patterns": {
-          "description": "When base_from_fork_point is enabled, which non-default branches may be selected as a base, as regular-expression patterns matched against the branch name. The repository's default branch always qualifies; a non-default branch qualifies only if it matches one of these. E.g. [\"^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$\"] lets version branches be auto-detected bases.",
+          "description": "Optional restriction on which branches fork-point detection may select as a base, as regular-expression patterns matched against the branch name. Empty (the default) means ANY branch can be a base, so a branch is routed to whatever branch it was forked from. When non-empty, only the repository's default branch or a branch matching one of these patterns may be a base (a non-matching fork parent is ignored, falling back to target_base). E.g. [\"^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$\"] restricts auto-detected bases to version branches for an archive layout.",
           "type": "array",
           "items": { "type": "string" },
           "uniqueItems": true

@@ -194,12 +194,48 @@ describe('detectForkBase', () => {
     expect(await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger())).toBeNull();
   });
 
-  it('never picks the branch itself, and skips a non-qualifying parent branch', async () => {
-    // claude/x forked off claude/parent (not a version, not default) which forked off 2.1.81.
+  it('with base_branch_patterns set, skips a non-qualifying parent branch', async () => {
+    // claude/x forked off claude/parent (not a version, not default) which forked off 2.1.81. With
+    // patterns configured, claude/parent doesn't qualify, so the base is the matching 2.1.81.
     stubCommits(['work1', 'ptip', 'vtip']);
     const tips = new Map([['work1', ['claude/x']], ['ptip', ['claude/parent']], ['vtip', ['2.1.81']]]);
     const r = await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger());
     expect(r).toEqual({ base: '2.1.81', ahead: 2 });
+  });
+
+  // The default: NO base_branch_patterns configured -> ANY branch is a valid fork-point base, so a
+  // branch is routed to whatever branch it was actually forked from (the headline behavior).
+  it('with no base_branch_patterns (the default), routes to the nearest branch it forked from — any branch', async () => {
+    // claude/x forked off claude/parent (a non-default working branch) which sits on master. The base
+    // must be claude/parent — where claude/x came from — NOT master underneath it.
+    stubCommits(['work1', 'ptip', 'mtip']);
+    const tips = new Map([['work1', ['claude/x']], ['ptip', ['claude/parent']], ['mtip', ['master']]]);
+    const r = await detectForkBase('o/r', 'claude/x', 'master', [], tips, 'tok', new Logger());
+    expect(r).toEqual({ base: 'claude/parent', ahead: 1 });
+  });
+
+  it('with no base_branch_patterns, a branch forked off the default branch still targets it', async () => {
+    stubCommits(['work1', 'mtip']);
+    const tips = new Map([['work1', ['claude/infra']], ['mtip', ['master']]]);
+    const r = await detectForkBase('o/r', 'claude/infra', 'master', [], tips, 'tok', new Logger());
+    expect(r).toEqual({ base: 'master', ahead: 1 });
+  });
+
+  it('with no base_branch_patterns, never picks the branch itself', async () => {
+    // The branch shares its own tip with no one; detection walks past it to the next branch tip.
+    stubCommits(['tip', 'mtip']);
+    const tips = new Map([['tip', ['claude/x']], ['mtip', ['master']]]);
+    const r = await detectForkBase('o/r', 'claude/x', 'master', [], tips, 'tok', new Logger());
+    expect(r).toEqual({ base: 'master', ahead: 1 });
+  });
+
+  it('with no base_branch_patterns, prefers the default branch when the fork-point commit is several branches\' tip', async () => {
+    // The fork-point commit is the tip of both a sibling branch and master (same commit, so
+    // interchangeable); the canonical default branch wins the tie regardless of listing order.
+    stubCommits(['work1', 'shared']);
+    const tips = new Map([['work1', ['claude/x']], ['shared', ['claude/sibling', 'master']]]);
+    const r = await detectForkBase('o/r', 'claude/x', 'master', [], tips, 'tok', new Logger());
+    expect(r).toEqual({ base: 'master', ahead: 1 });
   });
 });
 
