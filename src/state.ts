@@ -1,6 +1,8 @@
 // Workers KV state for the zombie check. Seven kinds of key:
 //   pr:{repo}#{num}        -> the head SHA we last evaluated that PR at
-//   backfill:{repo}        -> set once we've swept a repo's pre-existing PRs
+//   backfill:{repo}        -> the catch-up capabilities already swept for a repo (a CSV subset of
+//                             BACKFILL_CAPS), so a feature enabled AFTER the first sweep still gets
+//                             its one-time catch-up — its capability is absent from the set
 //   recheck:{repo}#{num}   -> a self-set "re-check this PR later" reminder (see setRecheck)
 //   conflict:{repo}#{num}  -> a self-set "re-check this PR's mergeability later" reminder, drained
 //                             by the cron's runConflictChecks (see setConflictCheck) — GitHub
@@ -15,9 +17,11 @@
 //                             describeRunId/markDescribeRun)
 // The per-PR marker is what makes the check "once per commit": a PR is evaluated only when its
 // current head SHA differs from what's stored (new PR, or new commits = a "touched" PR), and the
-// SHA is recorded afterwards. The backfill flag makes the first-webhook sweep of an already-
-// installed repo a one-time pass. KV is eventually consistent, which is fine here: every consumer
-// is idempotent (re-evaluating a PR, or re-sweeping a repo, only ever repeats harmless work).
+// SHA is recorded afterwards. The backfill set records WHICH catch-up sweeps a repo has had, so a
+// feature turned on after the first sweep is noticed (its capability is missing from the set) and
+// swept — recording only "swept at all" is what once left a feature enabled post-install with its
+// pre-existing PRs/branches never caught up. KV is eventually consistent, which is fine here: every
+// consumer is idempotent (re-evaluating a PR, or re-sweeping a repo, only ever repeats harmless work).
 
 const prKey = (repo: string, num: number) => `pr:${repo}#${num}`;
 const backfillKey = (repo: string) => `backfill:${repo}`;
@@ -37,12 +41,28 @@ export async function markChecked(kv: KVNamespace, repo: string, num: number, sh
   await kv.put(prKey(repo, num), sha);
 }
 
-export async function wasBackfilled(kv: KVNamespace, repo: string): Promise<boolean> {
-  return (await kv.get(backfillKey(repo))) !== null;
+// The catch-up sweeps maybeBackfillRepo runs, each gated on a config feature. The backfill:{repo}
+// value is the CSV of those already done for a repo; a capability missing from it — because the
+// feature was enabled after the first sweep, or the value predates this scheme — triggers its sweep.
+export type BackfillCap = 'zombie' | 'openpr' | 'conflict';
+export const BACKFILL_CAPS: readonly BackfillCap[] = ['zombie', 'openpr', 'conflict'];
+
+// The capabilities already backfilled for a repo. Only recognized BACKFILL_CAPS are returned, so the
+// legacy value (the ISO timestamp the old boolean flag stored) yields an empty set — "nothing
+// backfilled yet under this scheme" — which re-sweeps every currently-enabled capability. A missing
+// key is likewise empty.
+export async function backfilledCaps(kv: KVNamespace, repo: string): Promise<Set<BackfillCap>> {
+  const v = await kv.get(backfillKey(repo));
+  if (!v) return new Set();
+  const known = new Set<string>(BACKFILL_CAPS);
+  return new Set(v.split(',').filter((c) => known.has(c)) as BackfillCap[]);
 }
 
-export async function markBackfilled(kv: KVNamespace, repo: string): Promise<void> {
-  await kv.put(backfillKey(repo), new Date().toISOString());
+// Record the set of backfilled capabilities as a sorted, de-duplicated CSV. Callers pass the union of
+// what was already recorded and what they just swept.
+export async function markBackfilled(kv: KVNamespace, repo: string, caps: Iterable<BackfillCap>): Promise<void> {
+  const clean = [...new Set(caps)].sort();
+  await kv.put(backfillKey(repo), clean.join(','));
 }
 
 // A "re-check this PR later" reminder. reviveIfZombie writes one when it sees a follow-up commit
