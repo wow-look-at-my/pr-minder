@@ -38,11 +38,37 @@ const WEBHOOK_SWEEP_BUDGET = 15;
 // owner can't exceed GitHub's ~30/min search rate limit. The cron pass ignores this.
 const BACKSTOP_COOLDOWN_S = 60;
 
+// The GitHub event types pr-minder actually acts on (the same set dispatch() routes). Every other
+// delivery is dropped at the very top of handle() — before any token mint, KV access, or the
+// auto-merge backstop — so an over-broad event subscription can't slam the Worker with deliveries it
+// does nothing with. The motivating case: a CI-heavy org emits enormous volumes of workflow_job /
+// workflow_run events (queued/in_progress/completed per job and run); pr-minder needs none of them.
+// installation / installation_repositories are auto-delivered to every App; the rest must be
+// subscribed in the App settings. The real fix for the flood is to UNSUBSCRIBE the App from the
+// unwanted events (so GitHub never delivers them) — this gate is the cheap-by-construction backstop
+// for when it's still subscribed, and it also drops ping and any future auto-delivered event type.
+const HANDLED_EVENTS = new Set<string>([
+  'pull_request',
+  'pull_request_review',
+  'push',
+  'installation',
+  'installation_repositories',
+]);
+
 export async function handle(event: string | null, p: any, env: Env, log: Logger, defer?: Defer): Promise<void> {
   const repo = p.repository?.full_name;
   const action = p.action;
   const prNum = p.pull_request?.number;
   log.log(`event=${event} action=${action} repo=${repo} pr=${prNum}`);
+
+  // Drop any event type we don't act on before doing ANY work (no token mint, no KV, no backstop).
+  // This is what keeps the workflow_job / workflow_run flood from a CI-heavy org cheap even while the
+  // App is still subscribed to them — each such delivery now costs only the signature check plus this
+  // early return, instead of running the opportunistic per-repo work and the auto-merge backstop.
+  if (!event || !HANDLED_EVENTS.has(event)) {
+    log.log(`skip: unhandled event type (${event})`);
+    return;
+  }
 
   // Opportunistic per-repo work on every event for the source repo: ensure labels (throttled),
   // and backfill the zombie check once (the first time we ever see this repo). This is how a repo
