@@ -39,11 +39,15 @@ export interface AutoOpenPr {
   enabled: boolean;
   skipBranches: string[]; // extra branches to skip (exact names); default branch and gh-pages always skipped
   skipBranchPatterns: string[]; // extra branches to skip, as regex patterns (e.g. version branches)
-  // The base for an opened PR is detected automatically from the branch's fork point — the branch it
-  // was created from (the nearest ancestor commit that is another branch's HEAD). There is no manual
-  // base setting: git already knows where a branch came from and what it can merge back into. The
-  // repo's default branch is the fallback when no fork point is found, and the tie-break when the fork
-  // point is several branches' tip. See detectForkBase in handlers.ts.
+  targetBase: string; // fallback base branch for opened PRs; '' means the repo's default branch
+  // Detect the base for a branch from its fork point (the branch it was created from) instead of
+  // always using targetBase: the nearest ancestor commit that is another branch's HEAD picks the
+  // base, falling back to targetBase when none qualifies. On by default; set base_from_fork_point:
+  // false to always open into targetBase (or the repo's default branch) instead.
+  baseFromForkPoint: boolean;
+  // Which detected fork-point branches may be used as a base, as regex patterns. The repo's default
+  // branch always qualifies; a non-default branch qualifies only if it matches one of these.
+  baseBranchPatterns: string[];
   // When true (default), close any open non-draft PR whose net diff against its base is zero (no
   // changed files), regardless of who opened it. A 0-diff PR has nothing to review or merge and only
   // wastes CI on each update, so it's closed; squash-merge orphans (ahead by commit count, no net
@@ -77,7 +81,7 @@ const CONFIG_PATH = '.github/config/pr-minder/pr-minder.jsonc';
 
 export const DEFAULT_LABEL_COLOR = '00FF00';
 
-const DISABLED: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } };
+const DISABLED: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: true, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } };
 
 // Per-isolate config cache. loadConfig runs on essentially every webhook event (onPR,
 // onPushToDefault, onPushToBranch, the sweeps), and each resolution costs up to two GitHub
@@ -206,7 +210,7 @@ function defaultLabel(): LabelOptions {
 }
 
 export function mergeConfig(top: any, override: any): PrMinderConfig {
-  const result: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } };
+  const result: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: true, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } };
   for (const src of [top, override]) {
     if (!src) continue;
     if (src.auto_update_pr && Array.isArray(src.auto_update_pr.triggers)) {
@@ -223,6 +227,11 @@ export function mergeConfig(top: any, override: any): PrMinderConfig {
       }
       if (Array.isArray(a.skip_branch_patterns)) {
         result.autoOpenPr.skipBranchPatterns = a.skip_branch_patterns.filter((x: unknown) => typeof x === 'string');
+      }
+      if (typeof a.target_base === 'string') result.autoOpenPr.targetBase = a.target_base;
+      if (typeof a.base_from_fork_point === 'boolean') result.autoOpenPr.baseFromForkPoint = a.base_from_fork_point;
+      if (Array.isArray(a.base_branch_patterns)) {
+        result.autoOpenPr.baseBranchPatterns = a.base_branch_patterns.filter((x: unknown) => typeof x === 'string');
       }
       if (typeof a.close_when_empty === 'boolean') result.autoOpenPr.closeWhenEmpty = a.close_when_empty;
       if (typeof a.delete_branch_when_empty === 'boolean') result.autoOpenPr.deleteBranchWhenEmpty = a.delete_branch_when_empty;

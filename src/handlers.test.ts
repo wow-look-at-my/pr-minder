@@ -92,7 +92,7 @@ describe('isActionsBotPr', () => {
 
 describe('conflictLabelNames', () => {
   const baseCfg = (labels: PrMinderConfig['labels']): PrMinderConfig =>
-    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } });
+    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } });
   const opts = (mode?: 'auto_merge' | 'auto_update' | 'merge_conflict') =>
     ({ auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode, auto_merge_method: 'squash' as const });
 
@@ -171,53 +171,35 @@ describe('detectForkBase', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => shas.map((sha) => ({ sha })) })));
   };
   afterEach(() => vi.unstubAllGlobals());
+  const versionRe = ['^\\d+\\.\\d+\\.\\d+$'];
 
-  it('routes a working branch to the branch it forked from (here a long-lived version branch)', async () => {
+  it('routes a working branch to the version branch it forked from', async () => {
     // claude/x = one work commit on top of 2.1.81's tip (an archive branch whose tip never moves).
     stubCommits(['work1', 'vtip']);
     const tips = new Map([['vtip', ['2.1.81']], ['work1', ['claude/x']]]);
-    const r = await detectForkBase('o/r', 'claude/x', 'master', tips, 'tok', new Logger());
+    const r = await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger());
     expect(r).toEqual({ base: '2.1.81', ahead: 1 });
   });
 
   it('routes a branch forked off the default branch to the default branch', async () => {
     stubCommits(['work1', 'work0', 'mtip']);
     const tips = new Map([['mtip', ['master']], ['work1', ['claude/infra']]]);
-    const r = await detectForkBase('o/r', 'claude/infra', 'master', tips, 'tok', new Logger());
+    const r = await detectForkBase('o/r', 'claude/infra', 'master', versionRe, tips, 'tok', new Logger());
     expect(r).toEqual({ base: 'master', ahead: 2 });
   });
 
-  it('returns null when no ancestor is any branch tip (caller falls back to default)', async () => {
+  it('returns null when no ancestor is a qualifying branch tip (caller falls back to default)', async () => {
     stubCommits(['work1', 'oldmaster']); // oldmaster is no branch tip (default branch has moved on)
     const tips = new Map([['mtip', ['master']], ['vtip', ['2.1.81']]]);
-    expect(await detectForkBase('o/r', 'claude/x', 'master', tips, 'tok', new Logger())).toBeNull();
+    expect(await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger())).toBeNull();
   });
 
-  it('targets the NEAREST branch it forked from — a non-default working branch, not the default underneath', async () => {
-    // The fix: claude/x forked off claude/parent, which itself sits on top of master. The PR must
-    // target claude/parent (where claude/x came from), NOT master. Previously a non-default,
-    // non-whitelisted parent was skipped and the base fell through to master — that was the bug.
-    stubCommits(['work1', 'ptip', 'mtip']);
-    const tips = new Map([['work1', ['claude/x']], ['ptip', ['claude/parent']], ['mtip', ['master']]]);
-    const r = await detectForkBase('o/r', 'claude/x', 'master', tips, 'tok', new Logger());
-    expect(r).toEqual({ base: 'claude/parent', ahead: 1 });
-  });
-
-  it('never picks the branch itself', async () => {
-    // The branch shares its own tip; that name is filtered out, so detection walks past it.
-    stubCommits(['tip', 'mtip']);
-    const tips = new Map([['tip', ['claude/x']], ['mtip', ['master']]]);
-    const r = await detectForkBase('o/r', 'claude/x', 'master', tips, 'tok', new Logger());
-    expect(r).toEqual({ base: 'master', ahead: 1 });
-  });
-
-  it('prefers the default branch when the fork-point commit is several branches\' tip', async () => {
-    // The fork-point commit is simultaneously the tip of master and a sibling branch (same commit, so
-    // interchangeable as a base); the canonical default branch wins the tie regardless of order.
-    stubCommits(['work1', 'shared']);
-    const tips = new Map([['work1', ['claude/x']], ['shared', ['claude/sibling', 'master']]]);
-    const r = await detectForkBase('o/r', 'claude/x', 'master', tips, 'tok', new Logger());
-    expect(r).toEqual({ base: 'master', ahead: 1 });
+  it('never picks the branch itself, and skips a non-qualifying parent branch', async () => {
+    // claude/x forked off claude/parent (not a version, not default) which forked off 2.1.81.
+    stubCommits(['work1', 'ptip', 'vtip']);
+    const tips = new Map([['work1', ['claude/x']], ['ptip', ['claude/parent']], ['vtip', ['2.1.81']]]);
+    const r = await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger());
+    expect(r).toEqual({ base: '2.1.81', ahead: 2 });
   });
 });
 
@@ -236,61 +218,30 @@ describe('maybeOpenPrForBranch', () => {
   }
   afterEach(() => vi.unstubAllGlobals());
 
+  // auto_open_pr enabled, no fork-point: the path is compareCommits -> hasOpenPrForBranch -> createPull.
   const config = (): PrMinderConfig => ({
     triggers: [], labels: {}, autoTriggerWorkflows: false,
-    autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false },
+    autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false },
     autoDescribePr: { enabled: false, model: '' },
   });
 
-  // Fork-point detection always runs now, so the path is listBranchHeads -> listCommitShas ->
-  // compareCommits -> hasOpenPrForBranch -> createPull. With no other branch tips in the branch's
-  // history, detection returns null and the base falls back to the passed default (here 'main').
-  const noOtherBranches = { match: '/branches', status: 200, body: [] as unknown };
-  const noForkCommits = { match: '/commits', status: 200, body: [] as unknown };
-
   const createdPr = (fetchMock: ReturnType<typeof stubFetch>) =>
     fetchMock.mock.calls.some(([u, init]) => typeof u === 'string' && u.endsWith('/pulls') && init?.method === 'POST');
-  const createdInto = (fetchMock: ReturnType<typeof stubFetch>) => {
-    const call = fetchMock.mock.calls.find(([u, init]) => typeof u === 'string' && u.endsWith('/pulls') && init?.method === 'POST');
-    return call ? JSON.parse((call[1] as any).body).base : undefined;
-  };
 
-  it('opens a PR (into the default base) when the branch is ahead with a non-empty diff', async () => {
+  it('opens a PR when the branch is ahead with a non-empty diff', async () => {
     const fetchMock = stubFetch([
-      noOtherBranches,
-      noForkCommits,
       { match: '/compare/', status: 200, body: { ahead_by: 1, behind_by: 0, files: [{ filename: 'doc.md' }] } },
       { match: '/pulls?', status: 200, body: [] },          // hasOpenPrForBranch: none open
       { match: '/pulls', status: 200, body: { number: 42 } }, // createPull
     ]);
     await maybeOpenPrForBranch('o/r', 'claude/x', 'main', config(), 'tok', new Logger());
     expect(createdPr(fetchMock)).toBe(true);
-    expect(createdInto(fetchMock)).toBe('main');
-  });
-
-  it('opens the PR into the branch\'s detected fork-point base, not the default branch', async () => {
-    // The fix end-to-end: claude/x forked from claude/parent (which sits on top of main). The base is
-    // detected as claude/parent, so the PR targets it — no config, no default-branch fallback.
-    const fetchMock = stubFetch([
-      { match: '/branches', status: 200, body: [
-        { name: 'claude/parent', commit: { sha: 'ptip' } },
-        { name: 'main', commit: { sha: 'mtip' } },
-      ] },
-      { match: '/commits', status: 200, body: [{ sha: 'work1' }, { sha: 'ptip' }, { sha: 'mtip' }] },
-      { match: '/compare/', status: 200, body: { ahead_by: 1, behind_by: 0, files: [{ filename: 'doc.md' }] } },
-      { match: '/pulls?', status: 200, body: [] },
-      { match: '/pulls', status: 200, body: { number: 99 } },
-    ]);
-    await maybeOpenPrForBranch('o/r', 'claude/x', 'main', config(), 'tok', new Logger());
-    expect(createdInto(fetchMock)).toBe('claude/parent');
   });
 
   it('does NOT open a content-empty PR (ahead by commits, zero changed files)', async () => {
     // The #224/#225/#226 case: branch ahead by 27 merge/squash-orphaned commits, but the net diff
     // is empty because the content is already in base. Must bail before the open-PR check or create.
     const fetchMock = stubFetch([
-      noOtherBranches,
-      noForkCommits,
       { match: '/compare/', status: 200, body: { ahead_by: 27, behind_by: 0, files: [] } },
     ]);
     await maybeOpenPrForBranch('o/r', 'claude/youthful-archimedes-s78n2q', 'main', config(), 'tok', new Logger());
@@ -299,8 +250,6 @@ describe('maybeOpenPrForBranch', () => {
 
   it('still opens when GitHub omits the files array (changed_files unknown -> fail open)', async () => {
     const fetchMock = stubFetch([
-      noOtherBranches,
-      noForkCommits,
       { match: '/compare/', status: 200, body: { ahead_by: 5, behind_by: 0 } }, // no files field
       { match: '/pulls?', status: 200, body: [] },
       { match: '/pulls', status: 200, body: { number: 7 } },
@@ -444,7 +393,7 @@ describe('reconcileAutoMerge', () => {
 
   const label = (name: string) => ({ name });
   const cfg = (labels: PrMinderConfig['labels']): PrMinderConfig =>
-    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } });
+    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } });
   const autoMergeLabel = { auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode: 'auto_merge' as const, auto_merge_method: 'squash' as const };
 
   afterEach(() => vi.unstubAllGlobals());
@@ -583,7 +532,7 @@ describe('closeEmptyAutoPrs', () => {
   const env = () => ({} as any);
   const cfg = (over: Partial<PrMinderConfig['autoOpenPr']> = {}): PrMinderConfig => ({
     triggers: [], labels: {}, autoTriggerWorkflows: false,
-    autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false, ...over },
+    autoOpenPr: { enabled: true, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false, ...over },
     autoDescribePr: { enabled: false, model: '' },
   });
 

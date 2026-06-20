@@ -380,7 +380,8 @@ async function onPushToBranch(p: any, env: Env, log: Logger): Promise<void> {
     return;
   }
   const branch = p.ref.slice('refs/heads/'.length);
-  await maybeOpenPrForBranch(repo, branch, p.repository.default_branch, config, token, log);
+  const base = config.autoOpenPr.targetBase || p.repository.default_branch;
+  await maybeOpenPrForBranch(repo, branch, base, config, token, log);
 }
 
 // The default branch and gh-pages are always skipped; the config can skip more by exact name or by
@@ -404,39 +405,37 @@ function buildTipMap(heads: { name: string; sha: string }[]): Map<string, string
 }
 
 // Pick the base for a branch from its fork point: walk the branch's commits newest-first and return
-// the first ancestor that is the HEAD of *any other* branch — that branch is where this branch was
-// created from, and so where its PR should merge back into. This is the whole feature: git already
-// knows where a branch came from (its history passes through the tip of the branch it forked from),
-// so the base needs no manual configuration. The nearest such branch wins because it's the most
-// specific fork point — a branch forked from another working branch targets that working branch, not
-// the default branch underneath it. Among several branches sharing the fork-point commit the default
-// branch is preferred (the canonical merge target; the others are the same commit, so interchangeable).
-// `ahead` is how many commits the branch adds on top of that base (its index in the commit list).
-// Returns null when no ancestor is any branch's tip, so the caller falls back to the default branch.
-// tipsBySha comes from buildTipMap; the branch's own name is excluded so it can't pick itself.
+// the first ancestor that is the HEAD of another *qualifying* branch — the repo default branch, or a
+// non-default branch matching one of baseBranchPatterns. In an archive repo a working branch is
+// forked from a long-lived branch (e.g. a version branch) whose tip never moves, so that tip is
+// exactly the fork point and names the base the work should merge back into. `ahead` is how many
+// commits the branch adds on top of that base (its index in the commit list). Returns null when no
+// qualifying ancestor is found, so the caller falls back to the default base. tipsBySha comes from
+// buildTipMap; the branch's own name is excluded so it can't pick itself.
 export async function detectForkBase(
   repo: string,
   branch: string,
   defaultBranch: string,
+  baseBranchPatterns: string[],
   tipsBySha: Map<string, string[]>,
   token: string,
   log: Logger,
 ): Promise<{ base: string; ahead: number } | null> {
   const commits = await listCommitShas(repo, branch, token, log);
   for (let i = 0; i < commits.length; i++) {
-    const names = (tipsBySha.get(commits[i]) ?? []).filter((n) => n !== branch);
-    if (names.length === 0) continue;
-    return { base: names.includes(defaultBranch) ? defaultBranch : names[0], ahead: i };
+    const names = tipsBySha.get(commits[i]);
+    if (!names) continue;
+    const base = names.find((n) => n !== branch && (n === defaultBranch || baseBranchPatterns.some((p) => matchesPattern(n, p))));
+    if (base) return { base, ahead: i };
   }
   return null;
 }
 
-// Open a PR for one branch into its base, when it's ahead and has no open PR. The base is detected
-// automatically from the branch's fork point — the branch it was created from (see detectForkBase) —
-// falling back to defaultBase (the repo's default branch) when the branch shares no other branch's
-// tip. There is no manual base setting: git knows where a branch came from and what it merges into.
-// tipsBySha (the SHA -> branch-tip map fork-point detection needs) is built once by the caller for a
-// sweep; for a single push it's built here on demand.
+// Open a PR for one branch into its base, when it's ahead and has no open PR. The base is targetBase
+// (or the repo default) unless base_from_fork_point is on, in which case it's detected from the
+// branch's fork point (see detectForkBase), falling back to the default base. tipsBySha is built once
+// by the caller for a sweep; for a single push it's built here on demand (only when fork-point
+// detection is enabled).
 export async function maybeOpenPrForBranch(repo: string, branch: string, defaultBase: string, config: PrMinderConfig, token: string, log: Logger, tipsBySha?: Map<string, string[]>): Promise<void> {
   const tag = `${repo}@${branch}`;
   const ao = config.autoOpenPr;
@@ -445,14 +444,16 @@ export async function maybeOpenPrForBranch(repo: string, branch: string, default
     return;
   }
 
-  const tips = tipsBySha ?? buildTipMap(await listBranchHeads(repo, token, log));
-  const detected = await detectForkBase(repo, branch, defaultBase, tips, token, log);
   let base = defaultBase;
-  if (detected) {
-    base = detected.base;
-    log.log(`${tag}: fork-point base ${base} (+${detected.ahead})`);
-  } else {
-    log.log(`${tag}: no fork-point base, defaulting to ${base}`);
+  if (ao.baseFromForkPoint) {
+    const tips = tipsBySha ?? buildTipMap(await listBranchHeads(repo, token, log));
+    const detected = await detectForkBase(repo, branch, defaultBase, ao.baseBranchPatterns, tips, token, log);
+    if (detected) {
+      base = detected.base;
+      log.log(`${tag}: fork-point base ${base} (+${detected.ahead})`);
+    } else {
+      log.log(`${tag}: no fork-point base, falling back to ${base}`);
+    }
   }
   if (base === branch) { log.log(`${tag}: skip (base == head)`); return; }
 
@@ -464,9 +465,9 @@ export async function maybeOpenPrForBranch(repo: string, branch: string, default
   // fresh commit sharing no history), so ahead_by stays > 0 while the net diff is empty. Opening then
   // produces a content-empty PR that auto_describe_pr correctly refuses to describe ("no diff"),
   // leaving a PR stuck with the branch name as its title/body forever (the #224/#225/#226 case). We
-  // always compare here — even though detectForkBase already gave an `ahead` count — because emptiness
-  // can only be read from the real diff, and one compare per about-to-open branch (a rare event) is
-  // cheap. changed_files === null means GitHub omitted the files array (oversized
+  // always compare here — even in fork-point mode, where detectForkBase already gave an ahead count —
+  // because emptiness can only be read from the real diff, and one compare per about-to-open branch
+  // (a rare event) is cheap. changed_files === null means GitHub omitted the files array (oversized
   // response): treat it as "has changes" and open, never suppress a real PR on an unknown.
   const cmp = await compareCommits(repo, base, branch, token, log);
   if (!cmp) { log.log(`${tag}: skip (compare failed)`); return; }
@@ -482,7 +483,7 @@ export async function maybeOpenPrForBranch(repo: string, branch: string, default
 // already exist (and are ahead of base with no PR). Going forward, per-branch pushes cover the rest.
 async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
   if (!config.autoOpenPr.enabled) return;
-  const base = await getDefaultBranch(repo, token, log);
+  const base = config.autoOpenPr.targetBase || (await getDefaultBranch(repo, token, log));
   if (!base) { log.log(`${repo}: skip auto_open_pr sweep (no base branch)`); return; }
   const heads = await listBranchHeads(repo, token, log);
   // Build the SHA -> branch-name map once for the whole sweep so per-branch fork-point detection

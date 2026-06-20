@@ -64,7 +64,7 @@
       "default": false
     },
     "autoOpenPr": {
-      "description": "Automatically open a pull request for any branch that is ahead of its base and has no open PR. PRs are opened with pr-minder's own App credentials, so (unlike PRs created by a workflow's default GITHUB_TOKEN) they trigger their workflows normally and are never 'zombie' PRs. Fires on a push to a non-default branch, and sweeps existing branches when the App is installed or repositories are added. The default branch and gh-pages are always skipped. The base is detected automatically from each branch's fork point — the branch it was created from — with no manual base setting; the repository's default branch is the fallback when no fork point is found.",
+      "description": "Automatically open a pull request for any branch that is ahead of its base and has no open PR. PRs are opened with pr-minder's own App credentials, so (unlike PRs created by a workflow's default GITHUB_TOKEN) they trigger their workflows normally and are never 'zombie' PRs. Fires on a push to a non-default branch, and sweeps existing branches when the App is installed or repositories are added. The default branch and gh-pages are always skipped. By default the base is detected from each branch's fork point (base_from_fork_point, on by default) — the branch it was created from — falling back to target_base (or the default branch); set base_from_fork_point to false to always open into target_base instead.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -74,13 +74,28 @@
           "default": false
         },
         "skip_branches": {
-          "description": "Additional branch names (exact match) to never open PRs for. The default branch and gh-pages are always skipped regardless. (This controls which branches get a PR opened FOR them as a head; it does not stop a branch from being auto-detected as another branch's base.)",
+          "description": "Additional branch names (exact match) to never open PRs for. The default branch and gh-pages are always skipped regardless.",
           "type": "array",
           "items": { "type": "string" },
           "uniqueItems": true
         },
         "skip_branch_patterns": {
-          "description": "Additional branches to never open PRs for, as regular-expression patterns matched against the branch name (anchor with ^...$ for a full-name match). Use this to exclude a whole family of branches at once — e.g. [\"^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$\"] excludes version branches like 2.1.81, so they never each become a PR head (while still letting a working branch forked from one be opened back into it — the base is detected from the fork point). A malformed pattern simply never matches.",
+          "description": "Additional branches to never open PRs for, as regular-expression patterns matched against the branch name (anchor with ^...$ for a full-name match). Use this to exclude a whole family of branches at once — e.g. [\"^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$\"] excludes version branches like 2.1.81, so they never each become a PR head. A malformed pattern simply never matches.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "target_base": {
+          "description": "Base branch for opened PRs. Defaults to the repository's default branch. When base_from_fork_point is enabled this is the fallback base used when no fork point is detected.",
+          "type": "string"
+        },
+        "base_from_fork_point": {
+          "description": "Detect each branch's base from its fork point instead of always using target_base: pr-minder walks the branch's commits newest-first and uses the first ancestor that is the HEAD of another qualifying branch (the default branch, or one matching base_branch_patterns). In an archive repo a working branch forked from a long-lived branch (e.g. a version branch) is opened back into that branch; a branch forked off the default branch goes into the default branch. Falls back to target_base when no qualifying fork point is found. On by default; set to false to always open into target_base (or the default branch).",
+          "type": "boolean",
+          "default": true
+        },
+        "base_branch_patterns": {
+          "description": "When base_from_fork_point is enabled, which non-default branches may be selected as a base, as regular-expression patterns matched against the branch name. The repository's default branch always qualifies; a non-default branch qualifies only if it matches one of these. E.g. [\"^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$\"] lets version branches be auto-detected bases.",
           "type": "array",
           "items": { "type": "string" },
           "uniqueItems": true
