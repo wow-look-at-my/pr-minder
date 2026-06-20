@@ -1,7 +1,7 @@
 import type { Env } from './worker';
 import { loadConfig, loadOwnerConfig, type PrMinderConfig, type TriggerCondition } from './config';
-import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, closePull, commentOnPr, deleteBranch, gh } from './github';
-import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, markSwept, recentlySwept } from './state';
+import { addLabelsToPr, removeLabelFromPr, ensureLabel, installToken, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, enableAutoMerge, disableAutoMerge, fetchApprovers, listInstallations, listInstallationRepos, repoInstallationId, getPull, compareCommits, hasOpenPrForBranch, listBranchHeads, listCommitShas, listOpenPulls, getDefaultBranch, createPull, searchPrsByLabel, closePull, commentOnPr, deleteBranch, appBotLogin, gh } from './github';
+import { checkedSha, markChecked, wasBackfilled, markBackfilled, setRecheck, clearRecheck, listRechecks, setConflictCheck, clearConflictCheck, listConflictChecks, setDescribeCheck, clearDescribeCheck, listDescribeChecks, describedDiffHash, markSwept, recentlySwept } from './state';
 import { describeSafely, shouldDescribe } from './describe';
 import type { Logger } from './logger';
 
@@ -359,6 +359,17 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
   // stale/null, so we can't read it here). Gated so it's free for repos without a merge_conflict label.
   if (conflictLabelNames(config).length > 0) {
     await enqueueConflictChecks(env, prs, repo, log);
+  }
+
+  // Catch a never-described auto-opened PR. auto_describe_pr is otherwise live-only, so a PR that
+  // predates the feature/install (or whose opened-event hand-off failed) is stuck with its branch
+  // name as the title forever — no synchronize will revisit it. Enqueue the qualifying ones (a KV
+  // put each, no GitHub call beyond the App-bot-login lookup, which is cached) for the cron to hand
+  // off. Runs here too — not just on the one-time backfill — so an already-installed repo's stuck
+  // PRs get picked up on its next default-branch push. No-op unless auto_describe_pr is enabled.
+  if (config.autoDescribePr.enabled) {
+    const botLogin = await appBotLogin(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+    await enqueueDescribeChecks(env, prs, repo, botLogin, log);
   }
 
   // The default branch just advanced, so any open PR whose content landed in it (e.g. via a sibling
@@ -761,6 +772,104 @@ export async function runConflictChecks(env: Env, log: Logger, budget: { calls: 
   }
 }
 
+// ----- auto_describe_pr backfill: describe a PR that the live opened/synchronize path never did.
+// auto_describe_pr is otherwise purely event-driven, so a PR opened before the feature existed (or
+// before the App was installed), or whose opened-event hand-off failed with no synchronize since, is
+// stuck with its branch name as the title forever. Like merge_conflict, the flow is enqueue-then-
+// drain: the qualifying PRs are flagged with a `describe:` KV reminder (cheap), and the cron
+// (runDescribeChecks) hands each off, budget-bounded. -----
+
+// Whether a PR is a candidate for describe backfill: it must be bot-authored AND still show its
+// branch name as the title. That title===branch test is the load-bearing safety: it's the exact
+// signature of an auto-opened PR that never got an AI title/description (the old github.token
+// workflow and pr-minder's own auto_open_pr both open with title = branch and a placeholder body),
+// and it guarantees we never overwrite a title/description that was already curated — once a PR has a
+// real title (a prior describe, or a human's edit) it no longer qualifies. Humans and dependabot are
+// excluded too: a human PR with a real title fails the test, dependabot's "Bump ..." titles never
+// equal the branch, and the bot-author gate covers the rest. botLogin is the App's own bot login (so
+// pr-minder's own stuck PRs qualify); null when it couldn't be resolved (then only github-actions[bot]
+// PRs match). Drafts never qualify (onPR skips drafts wholesale; the live path describes on
+// ready_for_review).
+function qualifiesForDescribeBackfill(pr: any, botLogin: string | null): boolean {
+  if (!pr || pr.draft) return false;
+  const branch = pr.head?.ref;
+  if (!branch || pr.title !== branch) return false;
+  return isActionsBotPr(pr) || (!!botLogin && pr.user?.login === botLogin);
+}
+
+// Flag every describe-backfill candidate in `prs` with a `describe:` reminder (a KV put each, no
+// GitHub call). Used where a set of PRs is already in hand (a default-branch push), so the cron can
+// hand each off. botLogin lets pr-minder's own stuck PRs qualify (see qualifiesForDescribeBackfill).
+async function enqueueDescribeChecks(env: Env, prs: any[], repo: string, botLogin: string | null, log: Logger): Promise<void> {
+  if (!env.PR_STATE) return;
+  let n = 0;
+  for (const pr of prs) {
+    if (!qualifiesForDescribeBackfill(pr, botLogin)) continue;
+    await setDescribeCheck(env.PR_STATE, repo, pr.number);
+    n++;
+  }
+  if (n) log.log(`${repo}: enqueued ${n} describe backfill check(s)`);
+}
+
+// Backfill/install entry: when auto_describe_pr is enabled, list the repo's open PRs and enqueue a
+// describe check for each candidate, so pre-existing undescribed PRs get a description without waiting
+// for an event. Gated on the feature being on, so it makes no GitHub call (no PR listing) where it's off.
+export async function enqueueDescribeChecksForRepo(repo: string, config: PrMinderConfig, env: Env, token: string, log: Logger): Promise<void> {
+  if (!env.PR_STATE || !config.autoDescribePr.enabled) return;
+  const prs = await listOpenPulls(repo, token, log);
+  const botLogin = await appBotLogin(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+  await enqueueDescribeChecks(env, prs, repo, botLogin, log);
+}
+
+// Scheduled describe-backfill sweep (a cron pass alongside runConflictChecks). Drains the `describe:`
+// reminders the enqueue points left behind, handing each PR off to the pr-describe webhook once.
+// Reads only the reminders — with none pending it's a single KV list and zero GitHub calls. Per
+// pending PR it mints a token (cached per run), loads the repo's config (cached per run), and — only
+// for a PR that still has no `desc:` marker (never described) and still qualifies (bot-authored,
+// title===branch) — calls describeSafely (which is itself idempotent: it dedups on the diff hash, so
+// a race with the live path can't double-describe). A PR already described, retitled, closed, or now
+// in a feature-off repo just has its reminder cleared; a transiently unreadable one is left for the
+// next sweep (TTL bounds it). `budget.calls` bounds the GitHub/hook calls so the pass stays under the
+// subrequest cap; PRs not reached this tick are picked up on the next.
+export async function runDescribeChecks(env: Env, log: Logger, budget: { calls: number }): Promise<void> {
+  if (!env.PR_STATE) return;
+  const pending = await listDescribeChecks(env.PR_STATE);
+  if (pending.length === 0) return;
+  log.log(`describe sweep: ${pending.length} pending PR(s)`);
+  const tokenByRepo = new Map<string, string | null>();
+  const configByRepo = new Map<string, PrMinderConfig>();
+  let botLogin: string | null | undefined; // the App's own bot login, resolved once lazily for the filter
+  for (const { repo, num } of pending) {
+    if (budget.calls <= 0) { log.log(`describe sweep: budget spent`); break; }
+    try {
+      if (!tokenByRepo.has(repo)) budget.calls -= 2; // repoInstallationId + installToken (first sight of repo)
+      const token = await tokenForRepo(repo, tokenByRepo, env, log);
+      if (!token) continue; // no token (uninstalled / transient) — leave it; the TTL bounds it
+      if (!configByRepo.has(repo)) {
+        const [owner, name] = repo.split('/');
+        budget.calls--; // loadConfig (memoized per owner/repo, but count one to be safe)
+        configByRepo.set(repo, await loadConfig(owner, name, token, log));
+      }
+      const config = configByRepo.get(repo)!;
+      if (!config.autoDescribePr.enabled) { await clearDescribeCheck(env.PR_STATE, repo, num); continue; } // feature off now
+      // Already described at least once -> the live path owns it from here; backfill only fixes the
+      // never-described case. Cheap KV read, charged nothing, and it skips the diff fetch entirely.
+      if ((await describedDiffHash(env.PR_STATE, repo, num)) !== null) { await clearDescribeCheck(env.PR_STATE, repo, num); continue; }
+      budget.calls--; // getPull
+      const pr = await getPull(repo, num, token, log);
+      if (!pr) continue; // transient — leave for the next sweep
+      if (pr.state !== 'open') { await clearDescribeCheck(env.PR_STATE, repo, num); continue; } // closed/merged — done
+      if (botLogin === undefined) botLogin = await appBotLogin(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log);
+      if (!qualifiesForDescribeBackfill(pr, botLogin)) { await clearDescribeCheck(env.PR_STATE, repo, num); continue; } // retitled/curated since, or not a bot PR
+      budget.calls -= 3; // describeSafely: diff fetch + cancel + hook POST (conservative)
+      await describeSafely(env, repo, pr, config, token, log);
+      await clearDescribeCheck(env.PR_STATE, repo, num);
+    } catch (e) {
+      log.log(`describe ${repo}#${num}: ${(e as Error).message}`);
+    }
+  }
+}
+
 // Sweep a repo's open PRs through reviveIfZombie. Used by the install/repos-added handlers and the
 // first-webhook backfill. listOpenPulls already carries each PR's author, so we pre-filter to
 // bot-authored candidates (free) before reviveIfZombie spends a KV read / hasWorkflowRuns call —
@@ -794,6 +903,7 @@ async function maybeBackfillRepo(fullName: string, installationId: number, env: 
     await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
     await maybeOpenPrsForRepo(fullName, config, token, log);
     await enqueueConflictChecksForRepo(fullName, config, env, token, log);
+    await enqueueDescribeChecksForRepo(fullName, config, env, token, log);
     await closeEmptyAutoPrs(fullName, config, token, env, log);
     await markBackfilled(env.PR_STATE, fullName);
   } catch (e) {
@@ -814,6 +924,7 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
       await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
       await maybeOpenPrsForRepo(fullName, config, token, log);
       await enqueueConflictChecksForRepo(fullName, config, env, token, log);
+      await enqueueDescribeChecksForRepo(fullName, config, env, token, log);
       await closeEmptyAutoPrs(fullName, config, token, env, log);
       if (env.PR_STATE) await markBackfilled(env.PR_STATE, fullName);
       labelCheckedAt.set(fullName, Date.now());
@@ -836,6 +947,7 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
       await maybeRetriggerZombiesForRepo(repo.full_name, config, token, env, log);
       await maybeOpenPrsForRepo(repo.full_name, config, token, log);
       await enqueueConflictChecksForRepo(repo.full_name, config, env, token, log);
+      await enqueueDescribeChecksForRepo(repo.full_name, config, env, token, log);
       await closeEmptyAutoPrs(repo.full_name, config, token, env, log);
       if (env.PR_STATE) await markBackfilled(env.PR_STATE, repo.full_name);
       labelCheckedAt.set(repo.full_name, Date.now());
