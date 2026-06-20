@@ -287,7 +287,10 @@ async function onPR(p: any, env: Env, log: Logger, defer?: Defer): Promise<void>
   // logs them at error level (Workers Logs), because an enabled feature failing invisibly
   // cost a debugging round once already. Operator surfaces only — never PR comments.
   if (config.autoDescribePr.enabled && shouldDescribe(action)) {
-    const work = describeSafely(env, repo, pr, config, token, log);
+    // A merge_conflict label on the PR means a conflict was just resolved (this push is the resolution).
+    // Drop the old description from the hand-off so the model re-derives it from the now-changed diff
+    // instead of assuming the prior description was still good (omitOldBody).
+    const work = describeSafely(env, repo, pr, config, token, log, { omitOldBody: hasMergeConflictLabel(pr, config) });
     if (defer) defer(work); else await work;
   }
 
@@ -750,6 +753,20 @@ async function tokenForRepo(repo: string, cache: Map<string, string | null>, env
 // feature is off for this repo, so every entry point gates on this being non-empty and costs nothing.
 export function conflictLabelNames(config: PrMinderConfig): string[] {
   return Object.entries(config.labels).filter(([, o]) => o.mode === 'merge_conflict').map(([name]) => name);
+}
+
+// Whether the PR currently carries any merge_conflict-mode label. pr-minder owns that label (added on
+// `mergeable === false`, removed on `mergeable === true`), so its presence means a conflict was flagged
+// and hasn't cleared yet. When the author pushes to resolve the conflict — a `synchronize` that also
+// triggers a describe — the label is still on (its removal is async: evaluateMergeConflict defers to
+// the cron while `mergeable` is still null), so this is the signal that the describe is happening right
+// after a conflict resolution. The describe then drops the OLD description (see DescribeOptions.
+// omitOldBody): the resolution changed the diff, so the prior text must be re-derived, not carried
+// forward as still-accurate. False (so old description is kept) where the merge_conflict feature is off.
+export function hasMergeConflictLabel(pr: any, config: PrMinderConfig): boolean {
+  const names = conflictLabelNames(config);
+  if (names.length === 0) return false;
+  return (pr.labels ?? []).some((l: any) => names.includes(l.name));
 }
 
 // A PR's conflict state from GitHub's `mergeable`: true = no conflict (so remove the label), false =

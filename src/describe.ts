@@ -16,6 +16,16 @@ import { describedDiffHash, markDescribed, describeRunId, markDescribeRun } from
 // exact marker rather than a copied literal.
 export const ZERO_DIFF_PREFIX = '[zero diff]';
 
+// Per-hand-off describe options.
+export interface DescribeOptions {
+  // Drop the PR's existing description from what the model sees (old_body is sent empty). Set when a
+  // merge_conflict label is present — i.e. a conflict was just resolved. The resolution changed the
+  // diff, so the prior description is suspect; with it carried forward the model tends to rubber-stamp
+  // the old text ("still accurate") instead of re-deriving the description from the new diff. The old
+  // TITLE is still sent (it drives the placeholder/validity check, so a good title isn't wiped).
+  omitOldBody?: boolean;
+}
+
 // The hand-off is a 202 from webhook-runner (it only spawns a container), so a short
 // timeout keeps a wedged runner from pinning the invocation.
 const HOOK_TIMEOUT_MS = 10_000;
@@ -38,7 +48,7 @@ export function shouldDescribe(action: string): boolean {
 // the webhook's internal retries own delivery — so a failed hand-off leaves the marker
 // untouched and the next event retries. Throws on failure; the caller logs and swallows
 // (a describe failure must never fail the webhook).
-export async function maybeDescribePr(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+export async function maybeDescribePr(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger, opts: DescribeOptions = {}): Promise<void> {
   const tag = `${repo}#${pr.number}`;
   if (!env.DESCRIBE_HOOK_URL) {
     // Reaching this function at all means auto_describe_pr is *enabled* in config (the caller
@@ -101,6 +111,12 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
     }
   }
 
+  // When a merge_conflict label is present (a conflict was just resolved), don't feed the PR's old
+  // description to the model: the resolution changed the diff, so the prior text is suspect and the
+  // model should re-derive it rather than carry it forward as still-accurate. The old title is kept
+  // (it drives the title placeholder/validity check, so a good title survives a conflict).
+  if (opts.omitOldBody) log.log(`${tag}: omitting prior description from describe (merge_conflict label present)`);
+
   // Always tell the webhook where to report a terminally failed run (fail_callback_url) so the
   // marker recorded below — optimistically, on hand-off — gets cleared and the next event
   // re-describes; otherwise a run that fails after acceptance would leave the PR marked described
@@ -113,7 +129,7 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
       repo,
       pr_number: pr.number,
       old_title: pr.title ?? '',
-      old_body: pr.body ?? '',
+      old_body: opts.omitOldBody ? '' : (pr.body ?? ''),
       diff,
       model: config.autoDescribePr.model || '',
       github_token: token,
@@ -174,9 +190,9 @@ async function markZeroDiff(env: Env, repo: string, pr: any, token: string, log:
 // enabled). Errors stay in the operator's panes by design: Worker-side failures here, and
 // everything that reaches the runner (denied keys, failed runs) on its dashboard — never as
 // comments broadcast on the PR. Describing must never fail the webhook.
-export async function describeSafely(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+export async function describeSafely(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger, opts: DescribeOptions = {}): Promise<void> {
   try {
-    await maybeDescribePr(env, repo, pr, config, token, log);
+    await maybeDescribePr(env, repo, pr, config, token, log, opts);
   } catch (e) {
     log.error(`${repo}#${pr.number}: describe failed: ${(e as Error).message}`);
   }
