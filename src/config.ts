@@ -40,9 +40,10 @@ export interface AutoOpenPr {
   skipBranches: string[]; // extra branches to skip (exact names); default branch and gh-pages always skipped
   skipBranchPatterns: string[]; // extra branches to skip, as regex patterns (e.g. version branches)
   targetBase: string; // fallback base branch for opened PRs; '' means the repo's default branch
-  // When true, the base for a branch is detected from its fork point (the branch it was created
-  // from) instead of always using targetBase: the nearest ancestor commit that is another branch's
-  // HEAD picks the base, falling back to targetBase when none qualifies.
+  // Detect the base for a branch from its fork point (the branch it was created from) instead of
+  // always using targetBase: the nearest ancestor commit that is another branch's HEAD picks the
+  // base, falling back to targetBase when none qualifies. On by default; set base_from_fork_point:
+  // false to always open into targetBase (or the repo's default branch) instead.
   baseFromForkPoint: boolean;
   // Which detected fork-point branches may be used as a base, as regex patterns. The repo's default
   // branch always qualifies; a non-default branch qualifies only if it matches one of these.
@@ -80,7 +81,7 @@ const CONFIG_PATH = '.github/config/pr-minder/pr-minder.jsonc';
 
 export const DEFAULT_LABEL_COLOR = '00FF00';
 
-const DISABLED: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } };
+const DISABLED: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: true, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } };
 
 // Per-isolate config cache. loadConfig runs on essentially every webhook event (onPR,
 // onPushToDefault, onPushToBranch, the sweeps), and each resolution costs up to two GitHub
@@ -209,7 +210,7 @@ function defaultLabel(): LabelOptions {
 }
 
 export function mergeConfig(top: any, override: any): PrMinderConfig {
-  const result: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } };
+  const result: PrMinderConfig = { triggers: [], labels: {}, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: true, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } };
   for (const src of [top, override]) {
     if (!src) continue;
     if (src.auto_update_pr && Array.isArray(src.auto_update_pr.triggers)) {
