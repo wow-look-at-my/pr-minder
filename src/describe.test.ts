@@ -101,6 +101,24 @@ describe('maybeDescribePr', () => {
     expect(store.get('descrun:o/r#7')).toBe('run-abc'); // run id remembered for cancellation
   });
 
+  it('withholds the old title AND description (both empty) when omitOldMetadata is set, leaving the diff intact', async () => {
+    const { kv } = fakeKV();
+    const fetchMock = routeFetch([
+      { match: '/repos/o/r/pulls/7', body: DIFF },
+      { match: '/hook/pr-describe', method: 'POST', status: 202, body: { run_id: 'run-c' } },
+    ]);
+    // Simulates a describe triggered right after a merge-conflict resolution (handlers passes
+    // omitOldMetadata when a merge_conflict label is present): the model must re-derive both the title
+    // and the description from the resolved diff rather than carry the stale metadata forward.
+    await maybeDescribePr(makeEnv(kv), 'o/r', pr, cfg(), 'tok', new Logger(), { omitOldMetadata: true });
+
+    const post = fetchMock.mock.calls.find(([u]) => (u as string) === HOOK)!;
+    const payload = JSON.parse((post[1] as any).body);
+    expect(payload.old_title).toBe(''); // prior title withheld — model regenerates it
+    expect(payload.old_body).toBe(''); // prior description withheld
+    expect(payload.diff).toBe(DIFF); // diff (and therefore the dedup hash) is unaffected
+  });
+
   it('skips the hand-off entirely when the diff is unchanged since the last run', async () => {
     const { kv } = fakeKV();
     routeFetch([

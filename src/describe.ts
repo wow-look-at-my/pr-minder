@@ -16,6 +16,17 @@ import { describedDiffHash, markDescribed, describeRunId, markDescribeRun } from
 // exact marker rather than a copied literal.
 export const ZERO_DIFF_PREFIX = '[zero diff]';
 
+// Per-hand-off describe options.
+export interface DescribeOptions {
+  // Drop the PR's existing title AND description from what the model sees (old_title and old_body both
+  // sent empty). Set when a merge_conflict label is present — i.e. a conflict was just resolved. The
+  // resolution changed the diff, so the prior title/description are suspect; carried forward, the model
+  // rubber-stamps them ("still accurate") instead of re-deriving both from the resolved diff. With the
+  // old title empty the webhook's placeholder check reads it as not-meaningfully-populated, so the
+  // title is regenerated too — both title and description come fresh from the new diff.
+  omitOldMetadata?: boolean;
+}
+
 // The hand-off is a 202 from webhook-runner (it only spawns a container), so a short
 // timeout keeps a wedged runner from pinning the invocation.
 const HOOK_TIMEOUT_MS = 10_000;
@@ -38,7 +49,7 @@ export function shouldDescribe(action: string): boolean {
 // the webhook's internal retries own delivery — so a failed hand-off leaves the marker
 // untouched and the next event retries. Throws on failure; the caller logs and swallows
 // (a describe failure must never fail the webhook).
-export async function maybeDescribePr(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+export async function maybeDescribePr(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger, opts: DescribeOptions = {}): Promise<void> {
   const tag = `${repo}#${pr.number}`;
   if (!env.DESCRIBE_HOOK_URL) {
     // Reaching this function at all means auto_describe_pr is *enabled* in config (the caller
@@ -101,6 +112,12 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
     }
   }
 
+  // When a merge_conflict label is present (a conflict was just resolved), don't feed the PR's old
+  // title or description to the model: the resolution changed the diff, so the prior metadata is
+  // suspect and the model should re-derive both rather than carry them forward as still-accurate.
+  // (An empty old title reads as a placeholder to the webhook, so the title is regenerated too.)
+  if (opts.omitOldMetadata) log.log(`${tag}: omitting prior title+description from describe (merge_conflict label present)`);
+
   // Always tell the webhook where to report a terminally failed run (fail_callback_url) so the
   // marker recorded below — optimistically, on hand-off — gets cleared and the next event
   // re-describes; otherwise a run that fails after acceptance would leave the PR marked described
@@ -112,8 +129,8 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
     body: JSON.stringify({
       repo,
       pr_number: pr.number,
-      old_title: pr.title ?? '',
-      old_body: pr.body ?? '',
+      old_title: opts.omitOldMetadata ? '' : (pr.title ?? ''),
+      old_body: opts.omitOldMetadata ? '' : (pr.body ?? ''),
       diff,
       model: config.autoDescribePr.model || '',
       github_token: token,
@@ -174,9 +191,9 @@ async function markZeroDiff(env: Env, repo: string, pr: any, token: string, log:
 // enabled). Errors stay in the operator's panes by design: Worker-side failures here, and
 // everything that reaches the runner (denied keys, failed runs) on its dashboard — never as
 // comments broadcast on the PR. Describing must never fail the webhook.
-export async function describeSafely(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
+export async function describeSafely(env: Env, repo: string, pr: any, config: PrMinderConfig, token: string, log: Logger, opts: DescribeOptions = {}): Promise<void> {
   try {
-    await maybeDescribePr(env, repo, pr, config, token, log);
+    await maybeDescribePr(env, repo, pr, config, token, log, opts);
   } catch (e) {
     log.error(`${repo}#${pr.number}: describe failed: ${(e as Error).message}`);
   }
