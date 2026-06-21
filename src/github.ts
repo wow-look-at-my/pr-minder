@@ -8,6 +8,21 @@ export class GhError extends Error {
 }
 
 export async function gh(path: string, token: string, log: Logger) {
+  const r = await fetch(`${API_BASE}${path}`, { headers: { ...ghHeaders(token), ...(await mirrorIdentity()) } });
+  if (!r.ok && r.status !== 404) log.log(`gh ${path}: ${r.status}`);
+  return r;
+}
+
+// ghDirect is gh() that always talks to api.github.com, bypassing the mirror.
+// Used for the two reads whose mirror-cached representation is *lossy* in a way
+// pr-minder depends on: the compare endpoint (the mirror caches ahead_by/
+// behind_by but not the `files` array, and we count it for the empty-PR gate —
+// a missing count silently fails that gate open) and the PR-files fallback (the
+// mirror caches filename/additions/deletions but not each file's `patch`, which
+// the 406 diff fallback reassembles). Both need GitHub's full response, so they
+// skip the cache. Every other read hits a path the mirror doesn't cache and so
+// is already proxied faithfully.
+async function ghDirect(path: string, token: string, log: Logger) {
   const r = await fetch(`https://api.github.com${path}`, { headers: ghHeaders(token) });
   if (!r.ok && r.status !== 404) log.log(`gh ${path}: ${r.status}`);
   return r;
@@ -20,6 +35,56 @@ export function ghHeaders(token: string): HeadersInit {
     'x-github-api-version': '2022-11-28',
     'user-agent': 'pr-minder',
   };
+}
+
+// --- API base + mirror identity --------------------------------------------
+// Installation-token API calls go through API_BASE, which defaults to GitHub
+// directly but can be pointed at the github-state-mirror proxy (cached reads,
+// transparent passthrough for everything else) via configureApi. The App-level
+// calls in this file (installToken, listInstallations, repoInstallationId,
+// appBotLogin) and graphql() always talk to GitHub directly: they authenticate
+// as the App itself (a JWT, which the mirror can't validate for partitioning),
+// and the mirror's /graphql is a cache assembler, not a GraphQL proxy.
+let API_BASE = 'https://api.github.com';
+let mirrorAppId: string | null = null;
+let mirrorPrivateKey: string | null = null;
+let mirrorJwt: { token: string; exp: number } | null = null;
+
+// configureApi sets the API base and, when that base is the mirror, the App
+// credentials used to mint the X-Mirror-Identity assertion. Called once per
+// request/cron from worker.ts; idempotent and safe to call repeatedly.
+export function configureApi(base?: string, appId?: string, privateKey?: string): void {
+  if (base) API_BASE = base;
+  if (appId) mirrorAppId = appId;
+  if (privateKey) mirrorPrivateKey = privateKey;
+}
+
+// resetApiConfig restores defaults. Tests only (mirrors resetConfigCache).
+export function resetApiConfig(): void {
+  API_BASE = 'https://api.github.com';
+  mirrorAppId = null;
+  mirrorPrivateKey = null;
+  mirrorJwt = null;
+}
+
+function usingMirror(): boolean {
+  return API_BASE !== 'https://api.github.com';
+}
+
+// mirrorIdentity returns the X-Mirror-Identity header — a GitHub App JWT the
+// mirror verifies (GET /app) to partition pr-minder's hourly-rotating
+// installation tokens into one stable, webhook-fed cache bucket. Empty when not
+// using the mirror or when App credentials are unavailable (the mirror then
+// falls back to token-fingerprint partitioning, which still works, just without
+// a shared bucket). The JWT is cached per isolate and re-minted ~1 min before
+// its (~9 min) expiry — the same JWT used for App auth.
+async function mirrorIdentity(): Promise<Record<string, string>> {
+  if (!usingMirror() || !mirrorAppId || !mirrorPrivateKey) return {};
+  const now = Math.floor(Date.now() / 1000);
+  if (!mirrorJwt || mirrorJwt.exp < now + 60) {
+    mirrorJwt = { token: await appJWT(mirrorAppId, mirrorPrivateKey), exp: now + 540 };
+  }
+  return { 'x-mirror-identity': mirrorJwt.token };
 }
 
 export async function installToken(installId: number, appId: string, privateKey: string, log: Logger): Promise<string> {
@@ -41,9 +106,9 @@ export async function installToken(installId: number, appId: string, privateKey:
 }
 
 export async function updateBranch(repo: string, num: number, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}/update-branch`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/pulls/${num}/update-branch`, {
     method: 'PUT',
-    headers: ghHeaders(token),
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()) },
   });
   if (r.ok) return;
   // 422 is GitHub's catch-all "Unprocessable Entity". The common no-op is the branch already
@@ -109,9 +174,9 @@ export async function retriggerWorkflows(repo: string, num: number, token: strin
 }
 
 async function setPullState(repo: string, num: number, state: 'open' | 'closed', token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/pulls/${num}`, {
     method: 'PATCH',
-    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()), 'content-type': 'application/json' },
     body: JSON.stringify({ state }),
   });
   if (r.ok) { log.log(`setPullState ${repo}#${num}: ${state}`); return; }
@@ -152,7 +217,7 @@ export async function commitAgeSeconds(repo: string, sha: string, token: string,
 // "empty". Returns null on error (caller skips). Branch names keep their slashes in the path; git
 // ref rules forbid the characters that would need encoding.
 export async function compareCommits(repo: string, base: string, head: string, token: string, log: Logger): Promise<{ ahead_by: number; behind_by: number; changed_files: number | null } | null> {
-  const r = await gh(`/repos/${repo}/compare/${base}...${head}`, token, log);
+  const r = await ghDirect(`/repos/${repo}/compare/${base}...${head}`, token, log);
   if (!r.ok) return null;
   const data: any = await r.json();
   return {
@@ -231,9 +296,9 @@ export async function getDefaultBranch(repo: string, token: string, log: Logger)
 // Opens a PR head->base. Returns the new PR number, or null when GitHub declines for a
 // non-retryable reason (422: no commits between base and head, or a PR already exists).
 export async function createPull(repo: string, head: string, base: string, title: string, body: string, token: string, log: Logger): Promise<number | null> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/pulls`, {
     method: 'POST',
-    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()), 'content-type': 'application/json' },
     body: JSON.stringify({ head, base, title, body }),
   });
   if (r.ok) {
@@ -250,9 +315,9 @@ export async function createPull(repo: string, head: string, base: string, title
 
 export async function addLabelsToPr(repo: string, num: number, labels: string[], token: string, log: Logger): Promise<void> {
   if (labels.length === 0) return;
-  const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/labels`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/issues/${num}/labels`, {
     method: 'POST',
-    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()), 'content-type': 'application/json' },
     body: JSON.stringify({ labels }),
   });
   if (r.ok) {
@@ -268,9 +333,9 @@ export async function addLabelsToPr(repo: string, num: number, labels: string[],
 }
 
 export async function ensureLabel(repo: string, name: string, color: string, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/labels`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/labels`, {
     method: 'POST',
-    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()), 'content-type': 'application/json' },
     body: JSON.stringify({ name, color }),
   });
   if (r.status === 201) {
@@ -397,9 +462,9 @@ export function resetAppBotLoginCache(): void {
 // Close a PR (PATCH state=closed). Throws on any non-2xx so the caller decides what to do; the
 // empty-PR sweep wraps each close in try/catch so one failure never aborts the rest.
 export async function closePull(repo: string, num: number, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/pulls/${num}`, {
     method: 'PATCH',
-    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()), 'content-type': 'application/json' },
     body: JSON.stringify({ state: 'closed' }),
   });
   if (r.ok) { log.log(`closePull ${repo}#${num}`); return; }
@@ -415,9 +480,9 @@ export async function closePull(repo: string, num: number, token: string, log: L
 // throws so the caller's per-PR try/catch logs it with context. Branch names keep their slashes in
 // the path; git ref rules forbid the characters that would otherwise need encoding (same as compareCommits).
 export async function deleteBranch(repo: string, branch: string, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/git/refs/heads/${branch}`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/git/refs/heads/${branch}`, {
     method: 'DELETE',
-    headers: ghHeaders(token),
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()) },
   });
   if (r.ok || r.status === 404) { log.log(`deleteBranch ${repo} ${branch}: ${r.status}`); return; }
   const body = await r.text();
@@ -429,9 +494,9 @@ export async function deleteBranch(repo: string, branch: string, token: string, 
 // Post an issue comment on a PR (best-effort). A failure here must never block the action it
 // explains (e.g. closing an empty PR), so it logs and swallows rather than throwing.
 export async function commentOnPr(repo: string, num: number, body: string, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/comments`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/issues/${num}/comments`, {
     method: 'POST',
-    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()), 'content-type': 'application/json' },
     body: JSON.stringify({ body }),
   });
   if (r.ok) { log.log(`commentOnPr ${repo}#${num}`); return; }
@@ -443,9 +508,9 @@ export async function commentOnPr(repo: string, num: number, body: string, token
 // Used by auto_describe_pr to give a 0-diff PR (which has no diff for the model to summarize) a
 // recognizable "[zero diff]" title instead of leaving it sitting with its branch name.
 export async function updatePullTitle(repo: string, num: number, title: string, body: string, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/pulls/${num}`, {
     method: 'PATCH',
-    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()), 'content-type': 'application/json' },
     body: JSON.stringify({ title, body }),
   });
   if (r.ok) { log.log(`updatePullTitle ${repo}#${num}: "${title}"`); return; }
@@ -459,8 +524,8 @@ export async function updatePullTitle(repo: string, num: number, title: string, 
 // the pr-describe webhook summarizes a large diff in parts). Null only on other errors or an
 // empty result, so callers still skip the event in those cases.
 export async function getPullDiff(repo: string, num: number, token: string, log: Logger): Promise<string | null> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}`, {
-    headers: { ...ghHeaders(token), accept: 'application/vnd.github.diff' },
+  const r = await fetch(`${API_BASE}/repos/${repo}/pulls/${num}`, {
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()), accept: 'application/vnd.github.diff' },
   });
   if (r.ok) return r.text();
   if (r.status === 406) {
@@ -479,7 +544,7 @@ export async function getPullDiff(repo: string, num: number, token: string, log:
 async function assembleDiffFromFiles(repo: string, num: number, token: string, log: Logger): Promise<string | null> {
   const parts: string[] = [];
   for (let page = 1; ; page++) {
-    const r = await gh(`/repos/${repo}/pulls/${num}/files?per_page=100&page=${page}`, token, log);
+    const r = await ghDirect(`/repos/${repo}/pulls/${num}/files?per_page=100&page=${page}`, token, log);
     if (!r.ok) {
       log.log(`getPullDiff ${repo}#${num}: files page ${page} -> ${r.status}`);
       break;
@@ -581,9 +646,9 @@ export async function enableAutoMerge(repo: string, num: number, nodeId: string,
 // Direct merge via the REST endpoint (this one DOES exist, unlike per-PR auto-merge). Used as
 // the fallback when a PR is already mergeable. merge_method is lowercase: merge | squash | rebase.
 export async function mergePullRequest(repo: string, num: number, method: string, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${num}/merge`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/pulls/${num}/merge`, {
     method: 'PUT',
-    headers: { ...ghHeaders(token), 'content-type': 'application/json' },
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()), 'content-type': 'application/json' },
     body: JSON.stringify({ merge_method: method || 'squash' }),
   });
   if (r.ok) { log.log(`mergePullRequest ${repo}#${num}: merged (${method || 'squash'})`); return; }
@@ -604,9 +669,9 @@ export async function disableAutoMerge(repo: string, num: number, nodeId: string
 }
 
 export async function removeLabelFromPr(repo: string, num: number, label: string, token: string, log: Logger): Promise<void> {
-  const r = await fetch(`https://api.github.com/repos/${repo}/issues/${num}/labels/${encodeURIComponent(label)}`, {
+  const r = await fetch(`${API_BASE}/repos/${repo}/issues/${num}/labels/${encodeURIComponent(label)}`, {
     method: 'DELETE',
-    headers: ghHeaders(token),
+    headers: { ...ghHeaders(token), ...(await mirrorIdentity()) },
   });
   if (r.ok) { log.log(`removeLabel ${repo}#${num}: "${label}"`); return; }
   const body = await r.text();
