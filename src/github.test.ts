@@ -537,21 +537,46 @@ describe('mirror routing (configureApi)', () => {
     expect(init.headers['x-mirror-identity']).toBeDefined();
   });
 
-  it('keeps App-level JWT calls on api.github.com even when the mirror is configured', async () => {
+  it('routes App-level JWT calls through the mirror base too (zero direct api.github.com)', async () => {
     const pem = await genPrivateKeyPem();
     configureApi('https://mirror.example', '123', pem);
     const fetchMock = stubFetch(200, []);
     await listInstallations('123', pem, new Logger());
-    expect(fetchMock.mock.calls[0][0]).toContain('https://api.github.com/app/installations');
+    expect(fetchMock.mock.calls[0][0]).toContain('https://mirror.example/app/installations');
   });
 
-  it('keeps compare direct on api.github.com (mirror caches it lossily) and still counts files', async () => {
+  it('routes compare through the mirror with the identity header and still counts files', async () => {
+    // The mirror passes /compare through to GitHub verbatim, so the full response
+    // (incl. files[]) comes back and the empty-PR gate's count survives.
     configureApi('https://mirror.example', '123', await genPrivateKeyPem());
     const fetchMock = stubFetch(200, { ahead_by: 2, behind_by: 0, files: [{}, {}, {}] });
     const res = await compareCommits('o/r', 'main', 'feat', 'tok', new Logger());
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe('https://api.github.com/repos/o/r/compare/main...feat');
-    expect(init.headers['x-mirror-identity']).toBeUndefined();
-    expect(res?.changed_files).toBe(3); // the empty-PR gate's signal survives
+    expect(url).toBe('https://mirror.example/repos/o/r/compare/main...feat');
+    expect(init.headers['x-mirror-identity']).toBeDefined();
+    expect(res?.changed_files).toBe(3);
+  });
+
+  it('routes auto-merge GraphQL mutations through the mirror with identity', async () => {
+    configureApi('https://mirror.example', '123', await genPrivateKeyPem());
+    const fetchMock = stubFetch(200, { data: {} });
+    await enableAutoMerge('o/r', 5, 'PR_node', 'squash', 'tok', new Logger());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://mirror.example/graphql');
+    expect(init.headers['x-mirror-identity']).toBeDefined();
+  });
+
+  // The guard: pr-minder must make ZERO direct api.github.com calls. Every fetch
+  // goes through API_BASE; this fails CI if a hardcoded GitHub host is ever
+  // reintroduced. (The API_BASE default constant and usingMirror comparison are
+  // not fetch() calls, so they're allowed.)
+  it('never hardcodes a direct api.github.com fetch (nipped in the bud)', async () => {
+    // node:fs + import.meta.url exist in the vitest (Node) runtime; this worker
+    // project's tsconfig doesn't type them, so reach them loosely.
+    // @ts-ignore - node built-in, intentionally untyped in the worker tsconfig
+    const fs = await import('node:fs');
+    const src: string = fs.readFileSync(new URL('./github.ts', (import.meta as any).url), 'utf8');
+    const directFetch = src.match(/fetch\(\s*[`'"]https:\/\/api\.github\.com/g);
+    expect(directFetch).toBeNull();
   });
 });
