@@ -11,7 +11,7 @@ The deployed Worker also serves its own public docs: a human-readable page at `/
 1. A GitHub App webhook fires on `pull_request`, `pull_request_review`, `push`, `installation`, or `installation_repositories` events
 2. The worker verifies the signature, mints an installation token, and calls GitHub's [update-branch API](https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request-branch) — skipping the merge when the branch already contains the base's changes, so it avoids leaving empty "Merge branch ..." commits on PRs that are already up to date in content
 3. On `installation.created` or `installation.new_permissions_accepted`, sweeps all repos to create any configured labels
-4. No state, no DB, no cron -- purely event-driven
+4. Primarily event-driven (reacts to webhooks in ~1s). A small every-5-min cron runs only three cheap, bounded KV-reminder drains (deferred zombie re-checks, the `merge_conflict` label, and the `auto_describe_pr` backfill). The slow, **fleet-wide** reconciliation — the cross-installation auto-merge backstop, the `auto_open_pr` catch-up that re-opens PRs for orphaned branches, close-empty, and the comprehensive `merge_conflict`/describe sweeps — runs in a separate scheduled [`pr-minder-reconcile`](https://github.com/wow-look-at-my/webhooks) hook on [webhook-runner](https://github.com/wow-look-at-my/webhook-runner) (a container with no Cloudflare subrequest cap), authenticating as the same GitHub App
 
 A PR is updated when **any** configured trigger is satisfied:
 

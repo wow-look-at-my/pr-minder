@@ -17,10 +17,14 @@ type = "Data"
 globs = ["**/*.gz"]
 fallthrough = true
 
-# Re-check sweep. Not a poll over all PRs: the handler reads only the `recheck:` reminders that
-# reviveIfZombie leaves for a follow-up commit too fresh to judge when its webhook arrived, so an
-# empty run is one KV list and zero GitHub calls. It exists because webhooks don't re-fire on their
-# own once a commit has aged past the "is its CI here yet?" window.
+# Cron: three cheap, bounded KV-reminder drains only — runRechecks (zombie revive deferrals),
+# runConflictChecks (merge_conflict label), runDescribeChecks (auto_describe_pr backfill). Each reads
+# only its own reminders (one KV list + zero GitHub calls when none are pending), so the cron never
+# fans out across the fleet or fights the 50-external-subrequest cap. The FLEET-WIDE reconciliation
+# that used to run here (the cross-installation auto-merge backstop reconcileAllInstalls, plus the
+# once-per-deploy startupReconcile and the per-webhook backstop) has MOVED to the pr-minder-reconcile
+# hook in wow-look-at-my/webhooks, run by webhook-runner on its own schedule — a container with no
+# subrequest cap, a multi-minute timeout, and durable retries. See CLAUDE.md ("Fleet reconciliation").
 [triggers]
 crons = ["*/5 * * * *"]
 
