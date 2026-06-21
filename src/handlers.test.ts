@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { handle, conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, maybeOpenPrForBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile, conflictLabelNames, closeEmptyAutoPrs } from './handlers';
+import { handle, conditionMet, isActionsBotPr, shouldSkipBranch, detectForkBase, maybeOpenPrForBranch, reviveIfZombie, shouldConsiderRevive, reconcileAutoMerge, reconcileInstall, startupReconcile, conflictLabelNames, hasMergeConflictLabel, closeEmptyAutoPrs } from './handlers';
 import { Logger } from './logger';
 import { resetConfigCache, type PrMinderConfig } from './config';
 
@@ -108,6 +108,37 @@ describe('conflictLabelNames', () => {
 
   it('is empty when no label uses merge_conflict mode (feature off)', () => {
     expect(conflictLabelNames(baseCfg({ ship: opts('auto_merge') }))).toEqual([]);
+  });
+});
+
+describe('hasMergeConflictLabel', () => {
+  const baseCfg = (labels: PrMinderConfig['labels']): PrMinderConfig =>
+    ({ triggers: [], labels, autoTriggerWorkflows: false, autoOpenPr: { enabled: false, skipBranches: [], skipBranchPatterns: [], targetBase: '', baseFromForkPoint: false, baseBranchPatterns: [], closeWhenEmpty: true, deleteBranchWhenEmpty: false }, autoDescribePr: { enabled: false, model: '' } });
+  const opts = (mode?: 'auto_merge' | 'auto_update' | 'merge_conflict') =>
+    ({ auto_add: false as const, create_label_if_missing_in_repo: false, color: '00ff00', mode, auto_merge_method: 'squash' as const });
+  const labeled = (...names: string[]) => ({ number: 1, labels: names.map((name) => ({ name })) });
+
+  it('is true when the PR carries a configured merge_conflict label', () => {
+    const cfg = baseCfg({ conflict: opts('merge_conflict'), ship: opts('auto_merge') });
+    expect(hasMergeConflictLabel(labeled('conflict'), cfg)).toBe(true);
+    expect(hasMergeConflictLabel(labeled('ship', 'conflict'), cfg)).toBe(true);
+  });
+
+  it('is false when the PR has no merge_conflict label (other labels do not count)', () => {
+    const cfg = baseCfg({ conflict: opts('merge_conflict'), ship: opts('auto_merge') });
+    expect(hasMergeConflictLabel(labeled('ship'), cfg)).toBe(false);
+    expect(hasMergeConflictLabel(labeled(), cfg)).toBe(false);
+  });
+
+  it('is false when the merge_conflict feature is off, even if a same-named label is present', () => {
+    // No label is configured merge_conflict-mode, so a stray "conflict" label is not pr-minder's signal.
+    const cfg = baseCfg({ conflict: opts('auto_update') });
+    expect(hasMergeConflictLabel(labeled('conflict'), cfg)).toBe(false);
+  });
+
+  it('tolerates a PR with no labels array', () => {
+    const cfg = baseCfg({ conflict: opts('merge_conflict') });
+    expect(hasMergeConflictLabel({ number: 1 }, cfg)).toBe(false);
   });
 });
 
