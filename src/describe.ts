@@ -18,12 +18,13 @@ export const ZERO_DIFF_PREFIX = '[zero diff]';
 
 // Per-hand-off describe options.
 export interface DescribeOptions {
-  // Drop the PR's existing description from what the model sees (old_body is sent empty). Set when a
-  // merge_conflict label is present — i.e. a conflict was just resolved. The resolution changed the
-  // diff, so the prior description is suspect; with it carried forward the model tends to rubber-stamp
-  // the old text ("still accurate") instead of re-deriving the description from the new diff. The old
-  // TITLE is still sent (it drives the placeholder/validity check, so a good title isn't wiped).
-  omitOldBody?: boolean;
+  // Drop the PR's existing title AND description from what the model sees (old_title and old_body both
+  // sent empty). Set when a merge_conflict label is present — i.e. a conflict was just resolved. The
+  // resolution changed the diff, so the prior title/description are suspect; carried forward, the model
+  // rubber-stamps them ("still accurate") instead of re-deriving both from the resolved diff. With the
+  // old title empty the webhook's placeholder check reads it as not-meaningfully-populated, so the
+  // title is regenerated too — both title and description come fresh from the new diff.
+  omitOldMetadata?: boolean;
 }
 
 // The hand-off is a 202 from webhook-runner (it only spawns a container), so a short
@@ -112,10 +113,10 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
   }
 
   // When a merge_conflict label is present (a conflict was just resolved), don't feed the PR's old
-  // description to the model: the resolution changed the diff, so the prior text is suspect and the
-  // model should re-derive it rather than carry it forward as still-accurate. The old title is kept
-  // (it drives the title placeholder/validity check, so a good title survives a conflict).
-  if (opts.omitOldBody) log.log(`${tag}: omitting prior description from describe (merge_conflict label present)`);
+  // title or description to the model: the resolution changed the diff, so the prior metadata is
+  // suspect and the model should re-derive both rather than carry them forward as still-accurate.
+  // (An empty old title reads as a placeholder to the webhook, so the title is regenerated too.)
+  if (opts.omitOldMetadata) log.log(`${tag}: omitting prior title+description from describe (merge_conflict label present)`);
 
   // Always tell the webhook where to report a terminally failed run (fail_callback_url) so the
   // marker recorded below — optimistically, on hand-off — gets cleared and the next event
@@ -128,8 +129,8 @@ export async function maybeDescribePr(env: Env, repo: string, pr: any, config: P
     body: JSON.stringify({
       repo,
       pr_number: pr.number,
-      old_title: pr.title ?? '',
-      old_body: opts.omitOldBody ? '' : (pr.body ?? ''),
+      old_title: opts.omitOldMetadata ? '' : (pr.title ?? ''),
+      old_body: opts.omitOldMetadata ? '' : (pr.body ?? ''),
       diff,
       model: config.autoDescribePr.model || '',
       github_token: token,
