@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, searchPrsByLabel, deleteBranch, GhError } from './github';
+import { enableAutoMerge, disableAutoMerge, mergePullRequest, updateBranch, mergeWouldBeEmpty, retriggerWorkflows, hasWorkflowRuns, commitAgeSeconds, getPull, compareCommits, hasOpenPrForBranch, listOpenPulls, createPull, searchPrsByLabel, deleteBranch, GhError, configureApi, resetApiConfig, listInstallations } from './github';
 import { Logger } from './logger';
 
 // Auto-merge goes through GraphQL (there is no REST endpoint), so we stub `fetch` and
@@ -32,7 +32,23 @@ function stubFetchRoutes(routes: Array<{ match: string; status: number; body: un
   return fn;
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  resetApiConfig();
+});
+
+// Generate a real PKCS8 RSA key so appJWT (used to mint the X-Mirror-Identity
+// assertion) succeeds in the identity tests.
+async function genPrivateKeyPem(): Promise<string> {
+  const kp = (await crypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true,
+    ['sign', 'verify'],
+  )) as CryptoKeyPair;
+  const der = (await crypto.subtle.exportKey('pkcs8', kp.privateKey)) as ArrayBuffer;
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(der)));
+  return `-----BEGIN PRIVATE KEY-----\n${b64.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----`;
+}
 
 describe('enableAutoMerge', () => {
   it('POSTs the GraphQL enable mutation with the PR node id', async () => {
@@ -480,5 +496,62 @@ describe('mergeWouldBeEmpty', () => {
   it('fails safe (false) when the test-merge commit cannot be fetched', async () => {
     routes([{ match: '/git/commits/MERGESHA', status: 404, body: { message: 'Not Found' } }]);
     expect(await mergeWouldBeEmpty('o/r', pr, 'BASETIP', 'tok', new Logger())).toBe(false);
+  });
+});
+
+describe('mirror routing (configureApi)', () => {
+  it('defaults to api.github.com when unconfigured', async () => {
+    const fetchMock = stubFetch(200, { number: 1 });
+    await getPull('o/r', 1, 'tok', new Logger());
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/pulls/1');
+    expect(fetchMock.mock.calls[0][1].headers['x-mirror-identity']).toBeUndefined();
+  });
+
+  it('sends installation-token reads to the mirror base (no identity without app creds)', async () => {
+    configureApi('https://mirror.example');
+    const fetchMock = stubFetch(200, { number: 7 });
+    await getPull('o/r', 7, 'tok', new Logger());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://mirror.example/repos/o/r/pulls/7');
+    expect(init.headers['x-mirror-identity']).toBeUndefined();
+  });
+
+  it('attaches the App JWT as X-Mirror-Identity when the mirror base has app creds', async () => {
+    configureApi('https://mirror.example', '123', await genPrivateKeyPem());
+    const fetchMock = stubFetch(200, []);
+    await listOpenPulls('o/r', 'tok', new Logger());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain('https://mirror.example/repos/o/r/pulls');
+    const jwt = init.headers['x-mirror-identity'];
+    expect(typeof jwt).toBe('string');
+    expect(jwt.split('.')).toHaveLength(3); // header.payload.signature
+  });
+
+  it('routes writes through the mirror base with the identity header', async () => {
+    configureApi('https://mirror.example', '123', await genPrivateKeyPem());
+    const fetchMock = stubFetch(201, { number: 9 });
+    await createPull('o/r', 'feat', 'main', 't', 'b', 'tok', new Logger());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://mirror.example/repos/o/r/pulls');
+    expect(init.method).toBe('POST');
+    expect(init.headers['x-mirror-identity']).toBeDefined();
+  });
+
+  it('keeps App-level JWT calls on api.github.com even when the mirror is configured', async () => {
+    const pem = await genPrivateKeyPem();
+    configureApi('https://mirror.example', '123', pem);
+    const fetchMock = stubFetch(200, []);
+    await listInstallations('123', pem, new Logger());
+    expect(fetchMock.mock.calls[0][0]).toContain('https://api.github.com/app/installations');
+  });
+
+  it('keeps compare direct on api.github.com (mirror caches it lossily) and still counts files', async () => {
+    configureApi('https://mirror.example', '123', await genPrivateKeyPem());
+    const fetchMock = stubFetch(200, { ahead_by: 2, behind_by: 0, files: [{}, {}, {}] });
+    const res = await compareCommits('o/r', 'main', 'feat', 'tok', new Logger());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/o/r/compare/main...feat');
+    expect(init.headers['x-mirror-identity']).toBeUndefined();
+    expect(res?.changed_files).toBe(3); // the empty-PR gate's signal survives
   });
 });
