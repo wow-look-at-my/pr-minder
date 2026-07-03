@@ -650,7 +650,7 @@ const REVIVE_MIN_AGE_S = 60;
 // a zombie. Degrades to "always check, never record" if the KV binding is somehow absent.
 export async function reviveIfZombie(env: Env, repo: string, pr: any, token: string, log: Logger): Promise<boolean> {
   const sha = pr?.head?.sha;
-  if (pr?.draft || !sha || !isActionsBotPr(pr)) return false;
+  if (!isZombieCandidate(pr)) return false;
   const prev = env.PR_STATE ? await checkedSha(env.PR_STATE, repo, pr.number) : null;
   if (prev === sha) return false;
 
@@ -721,8 +721,7 @@ export async function runRechecks(env: Env, log: Logger, budget: { calls: number
       // draft, non-bot, or already checked at its current SHA (a live event settled it between
       // enqueue and drain). Those verdicts are final for this reminder, so resolve it here; left
       // alone it would recharge the budget every tick until its TTL.
-      const sha = pr.head?.sha;
-      if (pr.draft || !sha || !isActionsBotPr(pr) || (await checkedSha(env.PR_STATE, repo, num)) === sha) {
+      if (!isZombieCandidate(pr) || (await checkedSha(env.PR_STATE, repo, num)) === pr.head.sha) {
         await clearRecheck(env.PR_STATE, repo, num);
         continue;
       }
@@ -1000,7 +999,7 @@ export async function runDescribeChecks(env: Env, log: Logger, budget: { calls: 
 async function maybeRetriggerZombiesForRepo(repo: string, config: PrMinderConfig, token: string, env: Env, log: Logger): Promise<void> {
   if (!config.autoTriggerWorkflows) return;
   const prs = await listOpenPulls(repo, token, log);
-  const candidates = prs.filter((pr) => !pr.draft && isActionsBotPr(pr) && pr.head?.sha);
+  const candidates = prs.filter(isZombieCandidate);
   log.log(`${repo}: zombie sweep over ${prs.length} open PRs (${candidates.length} bot-authored)`);
   for (const pr of candidates) {
     try {
@@ -1041,7 +1040,7 @@ async function enqueueZombieRechecks(env: Env, prs: any[], repo: string, log: Lo
   if (!env.PR_STATE) return;
   let n = 0;
   for (const pr of prs) {
-    if (pr.draft || !pr.head?.sha || !isActionsBotPr(pr)) continue;
+    if (!isZombieCandidate(pr)) continue;
     if ((await checkedSha(env.PR_STATE, repo, pr.number)) === pr.head.sha) continue; // already evaluated at this commit
     await setRecheck(env.PR_STATE, repo, pr.number);
     n++;
@@ -1211,6 +1210,13 @@ async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinde
 // that account's identity instead and trigger workflows normally.
 export function isActionsBotPr(pr: any): boolean {
   return pr?.user?.login === 'github-actions[bot]';
+}
+
+// A PR that can be a GITHUB_TOKEN zombie and is worth (re-)evaluating: bot-authored, non-draft,
+// with a head commit. The one predicate shared by reviveIfZombie's gate, the backfill enqueue
+// (enqueueZombieRechecks), and the cron drain's reminder-clearing (runRechecks), so they can't drift.
+function isZombieCandidate(pr: any): boolean {
+  return !pr?.draft && !!pr?.head?.sha && isActionsBotPr(pr);
 }
 
 // Which pull_request actions may trigger a zombie revive. opened / reopened / synchronize all
