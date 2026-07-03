@@ -87,8 +87,9 @@ export default {
   // each reads only its own reminders (a single KV list when none are pending, zero GitHub calls),
   // so the cron no longer fans out across the fleet or fights the 50-subrequest cap:
   //  1) runRechecks — drains the `recheck:` reminders reviveIfZombie leaves for follow-up commits too
-  //     fresh to judge when their webhook arrived. Stays here: zombie revival is the Worker's, not the
-  //     reconcile hook's, and it is coupled to the Worker's own KV markers.
+  //     fresh to judge, plus the ones the backfill/install paths bulk-enqueue (a whole repo's zombie
+  //     candidates at once), so it is budget-bounded like the others. Stays here: zombie revival is
+  //     the Worker's, not the reconcile hook's, and it is coupled to the Worker's own KV markers.
   //  2) runConflictChecks — drains the `conflict:` reminders left by a PR's own events / a default
   //     push, settling each merge_conflict label once GitHub computed mergeability. Budget-bounded.
   //  3) runDescribeChecks — drains the `describe:` reminders the auto_describe_pr backfill left.
@@ -102,7 +103,9 @@ export default {
   async scheduled(_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     configureApi(env.GITHUB_API_BASE, env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
     const log = new Logger();
-    await runRechecks(env, log);
+    // Budgets count GitHub calls conservatively; worst case 15+12+10 external calls stays well
+    // under the invocation's 50-subrequest cap. Unreached reminders persist to the next tick.
+    await runRechecks(env, log, { calls: 15 });
     await runConflictChecks(env, log, { calls: 12 });
     await runDescribeChecks(env, log, { calls: 10 });
   },
