@@ -447,13 +447,15 @@ const FORK_SCAN_BUDGET = 10;
 const SWEEP_FORK_SCAN_BUDGET = 30;
 
 // Pick the base for a branch from its fork point — the branch it was created from, where its PR should
-// merge back into. **By default (no baseBranchPatterns) ANY other branch qualifies**, so a branch is
-// routed to whatever branch it was actually forked from — a branch forked off another working branch
-// targets that working branch, not the default branch beneath it. The nearest fork point wins (most
-// specific); a tie at the same commit prefers the default branch. With baseBranchPatterns set it's a
-// restriction: only the default branch or a pattern-matching branch may be a base (the archive/
-// version-branch opt-in). `ahead` = commits the branch adds on top of that base. Returns null when no
-// qualifying fork point is found, so the caller falls back to the default base.
+// merge back into. **Only the default branch or a baseBranchPatterns-matching branch may be a base**:
+// with no patterns configured (the default) the only possible answer is the default branch itself, so
+// auto-opened PRs always target it — a branch forked off another working branch is never routed into
+// that working branch. Non-default bases are the explicit opt-in via base_branch_patterns (the archive/
+// version-branch layout). Among qualifying candidates the nearest fork point wins (most specific); a
+// tie at the same commit prefers the default branch. `ahead` = commits the branch adds on top of that
+// base. Returns null when no qualifying fork point is found, so the caller falls back to the default
+// base. (Callers additionally skip detection entirely when no patterns are configured — see
+// maybeOpenPrForBranch — since it could never change the outcome; the predicate here is the contract.)
 //
 // Two passes, so a parent that has ADVANCED past the fork point is still found:
 //   1. Tip-walk (cheap): the nearest head-ancestor that is some qualifying branch's current TIP. This
@@ -480,7 +482,7 @@ export async function detectForkBase(
 ): Promise<{ base: string; ahead: number } | null> {
   const qualifies = (n: string) =>
     n !== branch &&
-    (baseBranchPatterns.length === 0 || n === defaultBranch || baseBranchPatterns.some((p) => matchesPattern(n, p)));
+    (n === defaultBranch || baseBranchPatterns.some((p) => matchesPattern(n, p)));
 
   const commits = await listCommitShas(repo, branch, token, log);
   const headIndex = new Map<string, number>();
@@ -525,10 +527,12 @@ export async function detectForkBase(
 }
 
 // Open a PR for one branch into its base, when it's ahead and has no open PR. With base_from_fork_point
-// on (the default) the base is detected from the branch's fork point — the branch it was created from
-// (see detectForkBase) — falling back to targetBase (or the repo default) when none is found; with it
-// off the base is always targetBase (or the repo default). tipsBySha is built once by the caller for a
-// sweep; for a single push it's built here on demand (only when fork-point detection is enabled).
+// on (the default) AND base_branch_patterns configured, the base is detected from the branch's fork
+// point — the branch it was created from (see detectForkBase) — falling back to targetBase (or the repo
+// default) when none is found; otherwise the base is always targetBase (or the repo default). With no
+// patterns, detection could never pick anything but the default base, so it is skipped outright — no
+// branch listing, no history walks, zero extra API calls. tipsBySha is built once by the caller for a
+// sweep; for a single push it's built here on demand (only when fork-point detection actually runs).
 export async function maybeOpenPrForBranch(repo: string, branch: string, defaultBase: string, config: PrMinderConfig, token: string, log: Logger, tipsBySha?: Map<string, string[]>, forkBudget?: { scans: number }): Promise<void> {
   const tag = `${repo}@${branch}`;
   const ao = config.autoOpenPr;
@@ -538,7 +542,7 @@ export async function maybeOpenPrForBranch(repo: string, branch: string, default
   }
 
   let base = defaultBase;
-  if (ao.baseFromForkPoint) {
+  if (ao.baseFromForkPoint && ao.baseBranchPatterns.length > 0) {
     const tips = tipsBySha ?? buildTipMap(await listBranchHeads(repo, token, log));
     const detected = await detectForkBase(repo, branch, defaultBase, ao.baseBranchPatterns, tips, token, log, forkBudget);
     if (detected) {
@@ -583,7 +587,10 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
   // single commits call each (not another branches listing). Skipped branches cost no call. The
   // moved-parent scan shares ONE budget across the whole sweep so the install/backfill invocation
   // can't blow the subrequest cap no matter how many branches have drifted from their fork parent.
-  const tips = buildTipMap(heads);
+  // With no base_branch_patterns fork-point detection never runs (only the default base could ever
+  // qualify), so the map isn't built at all.
+  const ao = config.autoOpenPr;
+  const tips = ao.baseFromForkPoint && ao.baseBranchPatterns.length > 0 ? buildTipMap(heads) : undefined;
   const forkBudget = { scans: SWEEP_FORK_SCAN_BUDGET };
   log.log(`${repo}: auto_open_pr sweep over ${heads.length} branches`);
   for (const h of heads) {

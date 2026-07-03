@@ -64,7 +64,7 @@
       "default": false
     },
     "autoOpenPr": {
-      "description": "Automatically open a pull request for any branch that is ahead of its base and has no open PR. PRs are opened with pr-minder's own App credentials, so (unlike PRs created by a workflow's default GITHUB_TOKEN) they trigger their workflows normally and are never 'zombie' PRs. Fires on a push to a non-default branch, and sweeps existing branches when the App is installed or repositories are added. The default branch and gh-pages are always skipped. By default the base is detected from each branch's fork point (base_from_fork_point, on by default) — the branch it was created from — falling back to target_base (or the default branch); set base_from_fork_point to false to always open into target_base instead.",
+      "description": "Automatically open a pull request for any branch that is ahead of its base and has no open PR. PRs are opened with pr-minder's own App credentials, so (unlike PRs created by a workflow's default GITHUB_TOKEN) they trigger their workflows normally and are never 'zombie' PRs. Fires on a push to a non-default branch, and sweeps existing branches when the App is installed or repositories are added. The default branch and gh-pages are always skipped. By default every PR opens into target_base (the repository's default branch unless set); opening into other branches is an explicit opt-in — name them in base_branch_patterns, and fork-point detection (base_from_fork_point, on by default) opens each branch back into the eligible branch it was created from.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -86,16 +86,16 @@
           "uniqueItems": true
         },
         "target_base": {
-          "description": "Base branch for opened PRs. Defaults to the repository's default branch. When base_from_fork_point is enabled this is the fallback base used when no fork point is detected.",
+          "description": "Base branch for opened PRs. Defaults to the repository's default branch. When fork-point detection is active (base_from_fork_point on AND base_branch_patterns non-empty) this is the fallback base used when no qualifying fork point is detected.",
           "type": "string"
         },
         "base_from_fork_point": {
-          "description": "Detect each branch's base from its fork point instead of always using target_base: pr-minder finds the branch the head was forked from (the nearest qualifying branch in the head's history) and opens the PR back into it. It still finds that parent even if the parent branch has since gained commits past the fork point (so the fork commit is no longer its tip). In an archive repo a working branch forked from a long-lived branch (e.g. a version branch) is opened back into that branch; a branch forked off the default branch goes into the default branch. Falls back to target_base when no qualifying fork point is found. On by default; set to false to always open into target_base (or the default branch).",
+          "description": "Detect each branch's base from its fork point instead of always using target_base: pr-minder finds the branch the head was forked from (the nearest qualifying branch in the head's history) and opens the PR back into it. Only acts when base_branch_patterns names eligible bases — only the default branch or a pattern-matching branch can ever be chosen, so with no patterns (the default) every PR opens into target_base (or the default branch) and detection is skipped entirely, costing no extra API calls. With patterns set, it still finds the parent even if that branch has since gained commits past the fork point (so the fork commit is no longer its tip). In an archive repo a working branch forked from a long-lived branch (e.g. a version branch) is opened back into that branch; a branch forked off the default branch goes into the default branch. Falls back to target_base when no qualifying fork point is found. On by default; set to false to always open into target_base (or the default branch) even with patterns configured.",
           "type": "boolean",
           "default": true
         },
         "base_branch_patterns": {
-          "description": "Optional restriction on which branches fork-point detection may select as a base, as regular-expression patterns matched against the branch name. Empty (the default) means ANY branch can be a base, so a branch is routed to whatever branch it was forked from. When non-empty, only the repository's default branch or a branch matching one of these patterns may be a base (a non-matching fork parent is ignored, falling back to target_base). E.g. [\"^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$\"] restricts auto-detected bases to version branches for an archive layout.",
+          "description": "The opt-in for non-default PR bases: regular-expression patterns (matched against the branch name) naming which branches fork-point detection may select as a base. Empty (the default) means only the repository's default branch can be a base — every auto-opened PR targets it (or target_base) and fork-point detection is skipped entirely. When non-empty, the default branch or a branch matching one of these patterns may be a base, so a branch forked from a matching branch is opened back into it (a non-matching fork parent is ignored, falling back to target_base). E.g. [\"^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$\"] makes version branches eligible bases for an archive layout.",
           "type": "array",
           "items": { "type": "string" },
           "uniqueItems": true

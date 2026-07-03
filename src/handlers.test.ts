@@ -245,15 +245,25 @@ describe('detectForkBase', () => {
     expect(r).toEqual({ base: '2.1.81', ahead: 2 });
   });
 
-  // The default: NO base_branch_patterns configured -> ANY branch is a valid fork-point base, so a
-  // branch is routed to whatever branch it was actually forked from (the headline behavior).
-  it('with no base_branch_patterns (the default), routes to the nearest branch it forked from — any branch', async () => {
-    // claude/x forked off claude/parent (a non-default working branch) which sits on master. The base
-    // must be claude/parent — where claude/x came from — NOT master underneath it.
+  // The default: NO base_branch_patterns configured -> only the default branch can be a fork-point
+  // base, so auto-opened PRs always target it. Other branches become eligible bases ONLY via the
+  // base_branch_patterns opt-in.
+  it('with no base_branch_patterns (the default), does NOT route to a working-branch parent', async () => {
+    // claude/x forked off claude/parent (a non-default working branch) which sits on master. Without
+    // patterns claude/parent is not an eligible base: the result must be master underneath it, never
+    // the working branch.
     stubCommits(['work1', 'ptip', 'mtip']);
     const tips = new Map([['work1', ['claude/x']], ['ptip', ['claude/parent']], ['mtip', ['master']]]);
     const r = await detectForkBase('o/r', 'claude/x', 'master', [], tips, 'tok', new Logger());
-    expect(r).toEqual({ base: 'claude/parent', ahead: 1 });
+    expect(r).toEqual({ base: 'master', ahead: 2 });
+  });
+
+  it('with no base_branch_patterns, returns null when the default branch is not in reach (caller falls back)', async () => {
+    // Head forked off claude/parent, and master shares no listed history with the head. claude/parent
+    // is ineligible without patterns, so nothing qualifies -> null -> the caller uses the default base.
+    stubCommitsByRef({ 'claude/x': ['work1', 'ptip'], 'claude/parent': ['ptip'], master: ['mtip', 'old'] });
+    const tips = new Map([['work1', ['claude/x']], ['ptip', ['claude/parent']], ['mtip', ['master']]]);
+    expect(await detectForkBase('o/r', 'claude/x', 'master', [], tips, 'tok', new Logger())).toBeNull();
   });
 
   it('with no base_branch_patterns, a branch forked off the default branch still targets it', async () => {
@@ -271,23 +281,24 @@ describe('detectForkBase', () => {
     expect(r).toEqual({ base: 'master', ahead: 1 });
   });
 
-  it('with no base_branch_patterns, prefers the default branch when the fork-point commit is several branches\' tip', async () => {
-    // The fork-point commit is the tip of both a sibling branch and master (same commit, so
-    // interchangeable); the canonical default branch wins the tie regardless of listing order.
+  it('prefers the default branch when the fork-point commit is several qualifying branches\' tip', async () => {
+    // The fork-point commit is the tip of both a pattern-matching version branch and master (same
+    // commit, so interchangeable); the canonical default branch wins the tie regardless of listing order.
     stubCommits(['work1', 'shared']);
-    const tips = new Map([['work1', ['claude/x']], ['shared', ['claude/sibling', 'master']]]);
-    const r = await detectForkBase('o/r', 'claude/x', 'master', [], tips, 'tok', new Logger());
+    const tips = new Map([['work1', ['claude/x']], ['shared', ['2.1.81', 'master']]]);
+    const r = await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger());
     expect(r).toEqual({ base: 'master', ahead: 1 });
   });
 
   // The moved-parent fix: a parent that gained commits AFTER the fork no longer has the fork commit as
-  // its tip, so the tip-walk misses it — the bounded history scan recovers it.
-  it('finds a parent that has advanced past the fork point (tip no longer the fork commit)', async () => {
+  // its tip, so the tip-walk misses it — the bounded history scan recovers it. (Patterns opt A in as an
+  // eligible base; without them only the default branch could be picked and the scan never runs.)
+  it('finds a pattern-matching parent that has advanced past the fork point (tip no longer the fork commit)', async () => {
     // feature forked from A at a1; A then advanced to a2 (A tip = a2, NOT in feature's history). The
     // fork commit a1 is still in A's history, so feature must target A — not master underneath it.
     stubCommitsByRef({ feature: ['f1', 'a1', 'M'], A: ['a2', 'a1', 'M'], master: ['M'] });
     const tips = new Map([['a2', ['A']], ['M', ['master']], ['f1', ['feature']]]);
-    const r = await detectForkBase('o/r', 'feature', 'master', [], tips, 'tok', new Logger());
+    const r = await detectForkBase('o/r', 'feature', 'master', ['^A$'], tips, 'tok', new Logger());
     expect(r).toEqual({ base: 'A', ahead: 1 });
   });
 
@@ -297,7 +308,7 @@ describe('detectForkBase', () => {
     stubCommitsByRef({ 'claude/x': ['work1', 'vtip'] });
     const tips = new Map([['vtip', ['2.1.81']], ['work1', ['claude/x']]]);
     const budget = { scans: 0 }; // no scans permitted
-    const r = await detectForkBase('o/r', 'claude/x', 'master', [], tips, 'tok', new Logger(), budget);
+    const r = await detectForkBase('o/r', 'claude/x', 'master', versionRe, tips, 'tok', new Logger(), budget);
     expect(r).toEqual({ base: '2.1.81', ahead: 1 });
     expect(budget.scans).toBe(0); // tip-walk handled it; nothing scanned
   });
@@ -306,7 +317,7 @@ describe('detectForkBase', () => {
     // Same moved-parent shape, but budget 0 -> A can't be discovered; degrades to master (no crash).
     stubCommitsByRef({ feature: ['f1', 'a1', 'M'], A: ['a2', 'a1', 'M'], master: ['M'] });
     const tips = new Map([['a2', ['A']], ['M', ['master']], ['f1', ['feature']]]);
-    const r = await detectForkBase('o/r', 'feature', 'master', [], tips, 'tok', new Logger(), { scans: 0 });
+    const r = await detectForkBase('o/r', 'feature', 'master', ['^A$'], tips, 'tok', new Logger(), { scans: 0 });
     expect(r).toEqual({ base: 'master', ahead: 2 });
   });
 });
@@ -364,6 +375,24 @@ describe('maybeOpenPrForBranch', () => {
     ]);
     await maybeOpenPrForBranch('o/r', 'claude/x', 'main', config(), 'tok', new Logger());
     expect(createdPr(fetchMock)).toBe(true);
+  });
+
+  it('with fork-point on but no base_branch_patterns, opens into the default base with no detection calls', async () => {
+    // The default config shape: baseFromForkPoint true, baseBranchPatterns empty. Detection could only
+    // ever pick the default base, so it must be skipped outright — no /branches listing, no /commits
+    // history walks — straight to compare -> open into the provided default base.
+    const cfg = config();
+    cfg.autoOpenPr.baseFromForkPoint = true; // baseBranchPatterns stays []
+    const fetchMock = stubFetch([
+      { match: '/compare/', status: 200, body: { ahead_by: 1, behind_by: 0, files: [{ filename: 'doc.md' }] } },
+      { match: '/pulls?', status: 200, body: [] },
+      { match: '/pulls', status: 200, body: { number: 43 } },
+    ]);
+    await maybeOpenPrForBranch('o/r', 'claude/x', 'main', cfg, 'tok', new Logger());
+    expect(createdPr(fetchMock)).toBe(true);
+    expect(fetchMock.mock.calls.some(([u]) => typeof u === 'string' && (u.includes('/branches') || u.includes('/commits')))).toBe(false);
+    const create = fetchMock.mock.calls.find(([u, init]) => typeof u === 'string' && u.endsWith('/pulls') && init?.method === 'POST');
+    expect(JSON.parse(create![1].body).base).toBe('main');
   });
 });
 
