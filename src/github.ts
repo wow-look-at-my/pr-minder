@@ -201,11 +201,13 @@ export async function commitAgeSeconds(repo: string, sha: string, token: string,
 
 // `${base}...${head}` commit comparison (three-dot: changes on head since it diverged from base —
 // the same net diff GitHub shows for a PR). Returns ahead_by/behind_by plus changed_files, the
-// number of files in that net diff. changed_files is null when GitHub omits the `files` array (an
-// oversized/pathological response) so a caller can fail open — "unknown" must never be mistaken for
-// "empty". Returns null on error (caller skips). Branch names keep their slashes in the path; git
-// ref rules forbid the characters that would need encoding.
-export async function compareCommits(repo: string, base: string, head: string, token: string, log: Logger): Promise<{ ahead_by: number; behind_by: number; changed_files: number | null } | null> {
+// number of files in that net diff, plus merge_base_sha — the commit the two sides diverged at
+// (GitHub's merge_base_commit; null when absent), which fork-point detection's default-branch
+// anchor reads. changed_files is null when GitHub omits the `files` array (an oversized/
+// pathological response) so a caller can fail open — "unknown" must never be mistaken for "empty".
+// Returns null on error (caller skips). Branch names keep their slashes in the path; git ref rules
+// forbid the characters that would need encoding.
+export async function compareCommits(repo: string, base: string, head: string, token: string, log: Logger): Promise<{ ahead_by: number; behind_by: number; changed_files: number | null; merge_base_sha: string | null } | null> {
   const r = await gh(`/repos/${repo}/compare/${base}...${head}`, token, log);
   if (!r.ok) return null;
   const data: any = await r.json();
@@ -213,6 +215,7 @@ export async function compareCommits(repo: string, base: string, head: string, t
     ahead_by: data.ahead_by ?? 0,
     behind_by: data.behind_by ?? 0,
     changed_files: Array.isArray(data.files) ? data.files.length : null,
+    merge_base_sha: typeof data.merge_base_commit?.sha === 'string' ? data.merge_base_commit.sha : null,
   };
 }
 

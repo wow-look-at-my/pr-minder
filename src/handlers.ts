@@ -447,27 +447,42 @@ const FORK_SCAN_BUDGET = 10;
 const SWEEP_FORK_SCAN_BUDGET = 30;
 
 // Pick the base for a branch from its fork point — the branch it was created from, where its PR should
-// merge back into. **Only the default branch or a baseBranchPatterns-matching branch may be a base**:
-// with no patterns configured (the default) the only possible answer is the default branch itself, so
-// auto-opened PRs always target it — a branch forked off another working branch is never routed into
-// that working branch. Non-default bases are the explicit opt-in via base_branch_patterns (the archive/
-// version-branch layout). Among qualifying candidates the nearest fork point wins (most specific); a
-// tie at the same commit prefers the default branch. `ahead` = commits the branch adds on top of that
-// base. Returns null when no qualifying fork point is found, so the caller falls back to the default
-// base. (Callers additionally skip detection entirely when no patterns are configured — see
-// maybeOpenPrForBranch — since it could never change the outcome; the predicate here is the contract.)
+// merge back into. **By default (no baseBranchPatterns) ANY other branch qualifies**, so a branch is
+// routed to whatever branch it was actually forked from — a branch forked off another working branch
+// targets that working branch, not the default branch beneath it. With baseBranchPatterns set it's a
+// restriction: only the default branch or a pattern-matching branch may be a base (the archive/
+// version-branch opt-in).
 //
-// Two passes, so a parent that has ADVANCED past the fork point is still found:
+// Selection contract: among qualifying candidates, the one whose MERGE BASE with head is nearest to
+// head wins (the most specific parent). The DEFAULT BRANCH is always evaluated — never skipped by the
+// scan budget, the candidate iteration order, or the early-stop — and wins every tie (a distance is a
+// position in head's listing, so equal distance means the SAME merge-base commit: two branches that
+// forked head at the same commit are interchangeable as parents, and the canonical one wins).
+// `ahead` = commits the branch adds on top of that base (the merge base's position in head's
+// listing). Returns null when no qualifying fork point is found, so the caller falls back to the
+// default base (which is that same default branch, so "unknown" and "default" agree).
+//
+// Two bounded passes plus an exact anchor, so a parent that has ADVANCED past the fork point is
+// still found:
 //   1. Tip-walk (cheap): the nearest head-ancestor that is some qualifying branch's current TIP. This
 //      catches every parent still sitting at the fork point — the common case, including static
 //      long-lived branches (e.g. archive version branches whose tip never moves).
 //   2. Moved-parent scan (bounded): a parent that gained commits after the fork no longer has the fork
 //      commit as its tip, so pass 1 misses it — but the fork commit is still in its recent HISTORY.
-//      For qualifying candidates whose tip was NOT matched in pass 1, fetch their history
+//      For qualifying NON-DEFAULT candidates whose tip was NOT matched in pass 1, fetch their history
 //      (listCommitShas) and look for a fork commit NEARER than the best tip-match. Static-tip parents
 //      were matched in pass 1 and are never scanned, so the archive repo pays nothing here; only
 //      genuinely moved (or unrelated) branches are scanned, bounded by `budget.scans`. Name the moving
 //      long-lived branches via base_branch_patterns to keep the scan small and exhaustive in a big repo.
+//   3. Default-branch anchor (exact): the default branch is deliberately EXCLUDED from pass 2 — that
+//      loop is allowed to miss candidates (budget, ordering, early-stop), and the default branch must
+//      never be one it misses, or a stale sibling tip parked at head's fork commit hijacks the base.
+//      If the tip-walk didn't already measure the default branch, ONE compareCommits(default...head)
+//      resolves its true merge base — exact even when the default branch has advanced beyond what any
+//      bounded history listing reaches — and consider() scores it with the same position metric,
+//      preferring the default branch on ties. A merge base outside head's listed window is strictly
+//      farther than any in-window winner (best stands); a failed compare fails open to the scanned
+//      result. At most one extra call, and none when the default's tip is in head's history.
 // tipsBySha comes from buildTipMap (all branch tips); the branch's own name is excluded so it can't
 // pick itself.
 export async function detectForkBase(
@@ -482,7 +497,7 @@ export async function detectForkBase(
 ): Promise<{ base: string; ahead: number } | null> {
   const qualifies = (n: string) =>
     n !== branch &&
-    (n === defaultBranch || baseBranchPatterns.some((p) => matchesPattern(n, p)));
+    (baseBranchPatterns.length === 0 || n === defaultBranch || baseBranchPatterns.some((p) => matchesPattern(n, p)));
 
   const commits = await listCommitShas(repo, branch, token, log);
   const headIndex = new Map<string, number>();
@@ -509,12 +524,15 @@ export async function detectForkBase(
     }
   }
 
-  // Pass 2: moved-parent scan. Only qualifying candidates NOT matched by their tip in pass 1, bounded.
+  // Pass 2: moved-parent scan. Only qualifying NON-DEFAULT candidates not matched by their tip in
+  // pass 1, bounded. The default branch is excluded on purpose: this loop may miss candidates
+  // (budget, iteration order, early-stop), and the default branch gets the exact anchor below
+  // instead, which none of those can cut off.
   const allNames = new Set<string>();
   for (const names of tipsBySha.values()) for (const n of names) allNames.add(n);
   for (const n of allNames) {
-    if (best !== null && best.ahead <= 1) break; // can't beat a 1-commit fork; stop early
-    if (tipMatched.has(n) || !qualifies(n)) continue;
+    if (best !== null && best.ahead <= 1) break; // nothing can BEAT a 1-commit fork (a tie can't win here; the default's tie is settled by the anchor)
+    if (n === defaultBranch || tipMatched.has(n) || !qualifies(n)) continue;
     if (budget.scans <= 0) { log.log(`${repo}@${branch}: fork-scan budget spent`); break; }
     budget.scans--;
     const hist = await listCommitShas(repo, n, token, log);
@@ -523,16 +541,28 @@ export async function detectForkBase(
       if (idx !== undefined) { best = consider(best, n, idx); break; }
     }
   }
+
+  // Pass 3: the default-branch anchor. Tip-matched means pass 1 already measured it exactly (a tip
+  // in head's history IS the merge base); otherwise resolve its true merge base with ONE exact
+  // compare and let consider() apply the same nearest-wins / ties-to-default rule. A merge base
+  // outside head's listed window is strictly farther than any in-window winner, so best stands.
+  if (!tipMatched.has(defaultBranch) && qualifies(defaultBranch)) {
+    const cmp = await compareCommits(repo, defaultBranch, branch, token, log);
+    if (cmp === null) {
+      log.log(`${repo}@${branch}: default-base anchor compare failed (fail open)`);
+    } else if (cmp.merge_base_sha) {
+      const idx = headIndex.get(cmp.merge_base_sha);
+      if (idx !== undefined) best = consider(best, defaultBranch, idx);
+    }
+  }
   return best;
 }
 
 // Open a PR for one branch into its base, when it's ahead and has no open PR. With base_from_fork_point
-// on (the default) AND base_branch_patterns configured, the base is detected from the branch's fork
-// point — the branch it was created from (see detectForkBase) — falling back to targetBase (or the repo
-// default) when none is found; otherwise the base is always targetBase (or the repo default). With no
-// patterns, detection could never pick anything but the default base, so it is skipped outright — no
-// branch listing, no history walks, zero extra API calls. tipsBySha is built once by the caller for a
-// sweep; for a single push it's built here on demand (only when fork-point detection actually runs).
+// on (the default) the base is detected from the branch's fork point — the branch it was created from
+// (see detectForkBase) — falling back to targetBase (or the repo default) when none is found; with it
+// off the base is always targetBase (or the repo default). tipsBySha is built once by the caller for a
+// sweep; for a single push it's built here on demand (only when fork-point detection is enabled).
 export async function maybeOpenPrForBranch(repo: string, branch: string, defaultBase: string, config: PrMinderConfig, token: string, log: Logger, tipsBySha?: Map<string, string[]>, forkBudget?: { scans: number }): Promise<void> {
   const tag = `${repo}@${branch}`;
   const ao = config.autoOpenPr;
@@ -542,7 +572,7 @@ export async function maybeOpenPrForBranch(repo: string, branch: string, default
   }
 
   let base = defaultBase;
-  if (ao.baseFromForkPoint && ao.baseBranchPatterns.length > 0) {
+  if (ao.baseFromForkPoint) {
     const tips = tipsBySha ?? buildTipMap(await listBranchHeads(repo, token, log));
     const detected = await detectForkBase(repo, branch, defaultBase, ao.baseBranchPatterns, tips, token, log, forkBudget);
     if (detected) {
@@ -587,10 +617,7 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
   // single commits call each (not another branches listing). Skipped branches cost no call. The
   // moved-parent scan shares ONE budget across the whole sweep so the install/backfill invocation
   // can't blow the subrequest cap no matter how many branches have drifted from their fork parent.
-  // With no base_branch_patterns fork-point detection never runs (only the default base could ever
-  // qualify), so the map isn't built at all.
-  const ao = config.autoOpenPr;
-  const tips = ao.baseFromForkPoint && ao.baseBranchPatterns.length > 0 ? buildTipMap(heads) : undefined;
+  const tips = buildTipMap(heads);
   const forkBudget = { scans: SWEEP_FORK_SCAN_BUDGET };
   log.log(`${repo}: auto_open_pr sweep over ${heads.length} branches`);
   for (const h of heads) {
