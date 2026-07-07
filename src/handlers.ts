@@ -449,23 +449,40 @@ const SWEEP_FORK_SCAN_BUDGET = 30;
 // Pick the base for a branch from its fork point — the branch it was created from, where its PR should
 // merge back into. **By default (no baseBranchPatterns) ANY other branch qualifies**, so a branch is
 // routed to whatever branch it was actually forked from — a branch forked off another working branch
-// targets that working branch, not the default branch beneath it. The nearest fork point wins (most
-// specific); a tie at the same commit prefers the default branch. With baseBranchPatterns set it's a
+// targets that working branch, not the default branch beneath it. With baseBranchPatterns set it's a
 // restriction: only the default branch or a pattern-matching branch may be a base (the archive/
-// version-branch opt-in). `ahead` = commits the branch adds on top of that base. Returns null when no
-// qualifying fork point is found, so the caller falls back to the default base.
+// version-branch opt-in).
 //
-// Two passes, so a parent that has ADVANCED past the fork point is still found:
+// Selection contract: among qualifying candidates, the one whose MERGE BASE with head is nearest to
+// head wins (the most specific parent). The DEFAULT BRANCH is always evaluated — never skipped by the
+// scan budget, the candidate iteration order, or the early-stop — and wins every tie (a distance is a
+// position in head's listing, so equal distance means the SAME merge-base commit: two branches that
+// forked head at the same commit are interchangeable as parents, and the canonical one wins).
+// `ahead` = commits the branch adds on top of that base (the merge base's position in head's
+// listing). Returns null when no qualifying fork point is found, so the caller falls back to the
+// default base (which is that same default branch, so "unknown" and "default" agree).
+//
+// Two bounded passes plus an exact anchor, so a parent that has ADVANCED past the fork point is
+// still found:
 //   1. Tip-walk (cheap): the nearest head-ancestor that is some qualifying branch's current TIP. This
 //      catches every parent still sitting at the fork point — the common case, including static
 //      long-lived branches (e.g. archive version branches whose tip never moves).
 //   2. Moved-parent scan (bounded): a parent that gained commits after the fork no longer has the fork
 //      commit as its tip, so pass 1 misses it — but the fork commit is still in its recent HISTORY.
-//      For qualifying candidates whose tip was NOT matched in pass 1, fetch their history
+//      For qualifying NON-DEFAULT candidates whose tip was NOT matched in pass 1, fetch their history
 //      (listCommitShas) and look for a fork commit NEARER than the best tip-match. Static-tip parents
 //      were matched in pass 1 and are never scanned, so the archive repo pays nothing here; only
 //      genuinely moved (or unrelated) branches are scanned, bounded by `budget.scans`. Name the moving
 //      long-lived branches via base_branch_patterns to keep the scan small and exhaustive in a big repo.
+//   3. Default-branch anchor (exact): the default branch is deliberately EXCLUDED from pass 2 — that
+//      loop is allowed to miss candidates (budget, ordering, early-stop), and the default branch must
+//      never be one it misses, or a stale sibling tip parked at head's fork commit hijacks the base.
+//      If the tip-walk didn't already measure the default branch, ONE compareCommits(default...head)
+//      resolves its true merge base — exact even when the default branch has advanced beyond what any
+//      bounded history listing reaches — and consider() scores it with the same position metric,
+//      preferring the default branch on ties. A merge base outside head's listed window is strictly
+//      farther than any in-window winner (best stands); a failed compare fails open to the scanned
+//      result. At most one extra call, and none when the default's tip is in head's history.
 // tipsBySha comes from buildTipMap (all branch tips); the branch's own name is excluded so it can't
 // pick itself.
 export async function detectForkBase(
@@ -507,18 +524,35 @@ export async function detectForkBase(
     }
   }
 
-  // Pass 2: moved-parent scan. Only qualifying candidates NOT matched by their tip in pass 1, bounded.
+  // Pass 2: moved-parent scan. Only qualifying NON-DEFAULT candidates not matched by their tip in
+  // pass 1, bounded. The default branch is excluded on purpose: this loop may miss candidates
+  // (budget, iteration order, early-stop), and the default branch gets the exact anchor below
+  // instead, which none of those can cut off.
   const allNames = new Set<string>();
   for (const names of tipsBySha.values()) for (const n of names) allNames.add(n);
   for (const n of allNames) {
-    if (best !== null && best.ahead <= 1) break; // can't beat a 1-commit fork; stop early
-    if (tipMatched.has(n) || !qualifies(n)) continue;
+    if (best !== null && best.ahead <= 1) break; // nothing can BEAT a 1-commit fork (a tie can't win here; the default's tie is settled by the anchor)
+    if (n === defaultBranch || tipMatched.has(n) || !qualifies(n)) continue;
     if (budget.scans <= 0) { log.log(`${repo}@${branch}: fork-scan budget spent`); break; }
     budget.scans--;
     const hist = await listCommitShas(repo, n, token, log);
     for (const sha of hist) {
       const idx = headIndex.get(sha); // newest commit of n that is in head's history = the merge base
       if (idx !== undefined) { best = consider(best, n, idx); break; }
+    }
+  }
+
+  // Pass 3: the default-branch anchor. Tip-matched means pass 1 already measured it exactly (a tip
+  // in head's history IS the merge base); otherwise resolve its true merge base with ONE exact
+  // compare and let consider() apply the same nearest-wins / ties-to-default rule. A merge base
+  // outside head's listed window is strictly farther than any in-window winner, so best stands.
+  if (!tipMatched.has(defaultBranch) && qualifies(defaultBranch)) {
+    const cmp = await compareCommits(repo, defaultBranch, branch, token, log);
+    if (cmp === null) {
+      log.log(`${repo}@${branch}: default-base anchor compare failed (fail open)`);
+    } else if (cmp.merge_base_sha) {
+      const idx = headIndex.get(cmp.merge_base_sha);
+      if (idx !== undefined) best = consider(best, defaultBranch, idx);
     }
   }
   return best;
