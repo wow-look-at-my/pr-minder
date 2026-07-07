@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { enabledBackfillCaps, backfillTodo, maybeBackfillRepo, resetBackfillThrottle } from './handlers';
-import { backfilledCaps, type BackfillCap } from './state';
+import { backfilledCaps, BACKFILL_CAPS, type BackfillCap } from './state';
 import { resetConfigCache, type PrMinderConfig } from './config';
+import { resetAppBotLoginCache } from './github';
 import { Logger } from './logger';
 
 // A real RSA key (PKCS8 PEM) so installToken's appJWT can sign — the token POST itself is stubbed.
@@ -93,7 +94,7 @@ describe('maybeBackfillRepo', () => {
   // A repo with one merge_conflict label -> the 'conflict' capability (the lightest sweep to drive).
   const conflictOrgCfg = { auto_label_pr: { 'needs-rebase': { mode: 'merge_conflict' } } };
 
-  beforeEach(() => { resetConfigCache(); resetBackfillThrottle(); });
+  beforeEach(() => { resetConfigCache(); resetBackfillThrottle(); resetAppBotLoginCache(); });
   afterEach(() => vi.unstubAllGlobals());
 
   it('does nothing (no token mint, no fetch) once every capability is already backfilled', async () => {
@@ -149,5 +150,88 @@ describe('maybeBackfillRepo', () => {
     await maybeBackfillRepo('o/r', 123, env, new Logger());
     expect(fetchMock.mock.calls.some(([u]) => (u as string).includes('/pulls?state=open'))).toBe(false);
     expect(store.size).toBe(1); // only the backfill key; no conflict reminders written
+  });
+
+  it('zombie backfill enqueues recheck reminders instead of reviving inline', async () => {
+    const { env, store } = fakeKV({ 'pr:o/r#8': 'sha8' }); // #8 already evaluated at its current commit
+    const fetchMock = stubFetch([
+      { match: '/access_tokens', body: { token: 't' } },
+      { match: '/repos/o/r/contents/', status: 404, body: {} },
+      orgCfg({ auto_trigger_workflows: true }),
+      { match: '/pulls?state=open', body: [
+        { number: 5, draft: false, head: { sha: 'sha5' }, user: { login: 'github-actions[bot]' } },
+        { number: 6, draft: false, head: { sha: 'sha6' }, user: { login: 'alice' } },
+        { number: 7, draft: true, head: { sha: 'sha7' }, user: { login: 'github-actions[bot]' } },
+        { number: 8, draft: false, head: { sha: 'sha8' }, user: { login: 'github-actions[bot]' } },
+      ] },
+    ]);
+    await maybeBackfillRepo('o/r', 123, env, new Logger());
+    expect(store.has('recheck:o/r#5')).toBe(true);  // bot-authored, unchecked -> enqueued for the cron
+    expect(store.has('recheck:o/r#6')).toBe(false); // human author
+    expect(store.has('recheck:o/r#7')).toBe(false); // draft
+    expect(store.has('recheck:o/r#8')).toBe(false); // already checked at sha8
+    // No inline evaluation: the event spends no /actions/runs read and no close/reopen PATCH.
+    expect(fetchMock.mock.calls.some(([u]) => (u as string).includes('/actions/runs'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([, init]) => (init as any)?.method === 'PATCH')).toBe(false);
+    expect(await backfilledCaps(env.PR_STATE, 'o/r')).toEqual(new Set<BackfillCap>(['zombie']));
+  });
+
+  it('openpr backfill records the capability without any sweep (the reconcile hook owns it)', async () => {
+    const { env } = fakeKV();
+    const fetchMock = stubFetch([
+      { match: '/access_tokens', body: { token: 't' } },
+      { match: '/repos/o/r/contents/', status: 404, body: {} },
+      orgCfg({ auto_open_pr: { enabled: true } }),
+    ]);
+    await maybeBackfillRepo('o/r', 123, env, new Logger());
+    expect(await backfilledCaps(env.PR_STATE, 'o/r')).toEqual(new Set<BackfillCap>(['openpr']));
+    // Nothing repo-sized in the event: no branch listing, no compares, no PR listing or creation.
+    for (const frag of ['/branches', '/compare/', '/pulls']) {
+      expect(fetchMock.mock.calls.some(([u]) => (u as string).includes(frag))).toBe(false);
+    }
+  });
+
+  it('shares ONE pulls listing across the zombie/conflict/describe enqueues', async () => {
+    const { env, store } = fakeKV();
+    const fetchMock = stubFetch([
+      { match: '/access_tokens', body: { token: 't' } },
+      { match: '/repos/o/r/contents/', status: 404, body: {} },
+      orgCfg({
+        auto_trigger_workflows: true,
+        auto_label_pr: { 'needs-rebase': { mode: 'merge_conflict' } },
+        auto_open_pr: { enabled: true },
+        auto_describe_pr: { enabled: true },
+      }),
+      { match: '/pulls?state=open', body: [
+        { number: 5, draft: false, title: 'claude/x', head: { sha: 'sha5', ref: 'claude/x' }, user: { login: 'github-actions[bot]' } },
+      ] },
+      { match: '/app', body: { slug: 'pr-minder' } },
+    ]);
+    await maybeBackfillRepo('o/r', 123, env, new Logger());
+    expect(fetchMock.mock.calls.filter(([u]) => (u as string).includes('/pulls?state=open'))).toHaveLength(1);
+    expect(store.has('recheck:o/r#5')).toBe(true);
+    expect(store.has('conflict:o/r#5')).toBe(true);
+    expect(store.has('describe:o/r#5')).toBe(true);
+    expect(await backfilledCaps(env.PR_STATE, 'o/r')).toEqual(new Set<BackfillCap>(BACKFILL_CAPS));
+  });
+
+  it('records each capability as it completes: one failing cap does not block the others', async () => {
+    // Make the zombie enqueue fail (its recheck: KV put throws); conflict must still enqueue and be
+    // recorded, so the failed cap alone retries after the throttle interval.
+    const { env, store } = fakeKV();
+    const realPut = env.PR_STATE.put;
+    env.PR_STATE.put = async (k: string, v: string, opts?: unknown) => {
+      if (k.startsWith('recheck:')) throw new Error('kv boom');
+      return realPut(k, v, opts);
+    };
+    stubFetch([
+      { match: '/access_tokens', body: { token: 't' } },
+      { match: '/repos/o/r/contents/', status: 404, body: {} },
+      orgCfg({ auto_trigger_workflows: true, auto_label_pr: { 'needs-rebase': { mode: 'merge_conflict' } } }),
+      { match: '/pulls?state=open', body: [{ number: 5, draft: false, head: { sha: 'sha5' }, user: { login: 'github-actions[bot]' } }] },
+    ]);
+    await maybeBackfillRepo('o/r', 123, env, new Logger());
+    expect(store.has('conflict:o/r#5')).toBe(true);
+    expect(await backfilledCaps(env.PR_STATE, 'o/r')).toEqual(new Set<BackfillCap>(['conflict']));
   });
 });
