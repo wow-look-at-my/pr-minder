@@ -219,9 +219,9 @@ export async function startupReconcile(env: Env, log: Logger): Promise<void> {
 // Reconcile native auto-merge for a repo's open PRs: every PR that carries an `auto_merge`-mode
 // label but doesn't have auto-merge armed yet gets (re)enabled — and enableAutoMerge merges the PR
 // directly when it's already mergeable and GitHub won't arm it, so a "ready" PR gets merged instead
-// of sitting forever. This is NOT a poll: it runs only on startup and on install (see callers). It's
-// cheap — listOpenPulls already carries each PR's labels and current auto_merge state, so we only
-// spend an enableAutoMerge call on a PR that has the label but isn't armed.
+// of sitting forever. No longer invoked by the Worker (the install-event call was the last one; the
+// pr-minder-reconcile hook's search-based backstop covers labeled PRs within minutes) — kept, like
+// reconcileInstall/reconcileAllInstalls, as the tested, ported reference.
 export async function reconcileAutoMerge(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
   const methodByLabel = new Map<string, string>();
   for (const [name, opts] of Object.entries(config.labels)) {
@@ -395,10 +395,10 @@ async function onPushToDefault(p: any, env: Env, log: Logger): Promise<void> {
     await enqueueDescribeChecks(env, prs, repo, botLogin, log);
   }
 
-  // The default branch just advanced, so any open PR whose content landed in it (e.g. via a sibling
-  // squash-merge) is now content-empty — close those, whoever opened them. No-op unless auto_open_pr
-  // + close_when_empty are on.
-  await closeEmptyAutoPrs(repo, config, token, env, log);
+  // Closing now-content-empty PRs (close_when_empty) deliberately does NOT run here: it costs one
+  // compareCommits per open PR, which on a 42-PR repo blew the invocation's 50-subrequest cap and
+  // 500'd the live webhook. The pr-minder-reconcile hook owns close-empty fleet-wide and revisits
+  // every repo within ~40 min of the base advancing.
 }
 
 // A push to a non-default branch: if auto_open_pr is on, open a PR for that branch when it's
@@ -606,8 +606,11 @@ export async function maybeOpenPrForBranch(repo: string, branch: string, default
   if (num !== null) log.log(`${tag}: opened PR #${num} -> ${base}`);
 }
 
-// Catch-up sweep run when the App is installed or repos are added: open PRs for branches that
-// already exist (and are ahead of base with no PR). Going forward, per-branch pushes cover the rest.
+// Catch-up sweep opening PRs for branches that already exist (and are ahead of base with no PR).
+// No longer invoked by the Worker: on a 45-branch repo the per-branch compares and fork-point scans
+// blew the webhook invocation's subrequest cap, so the install/backfill paths no longer run it —
+// the pr-minder-reconcile hook owns this catch-up fleet-wide. Kept as the tested, ported reference
+// (maybeOpenPrForBranch, the single-branch worker, is still the live onPushToBranch path).
 async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: string, log: Logger): Promise<void> {
   if (!config.autoOpenPr.enabled) return;
   const base = config.autoOpenPr.targetBase || (await getDefaultBranch(repo, token, log));
@@ -635,9 +638,10 @@ async function maybeOpenPrsForRepo(repo: string, config: PrMinderConfig, token: 
 // It closes only when compareCommits reports EXACTLY zero changed files; a null/unknown count
 // (GitHub omitted the files array) is left alone — "unknown" must never be mistaken for "empty", the
 // same fail-open rule the open gate uses. Gated on auto_open_pr.enabled + close_when_empty (both
-// default-on), so it costs nothing where the feature is off. Wired to run where the base can have
-// just advanced (push to the default branch) and on the install/backfill sweeps, mirroring where
-// maybeOpenPrsForRepo runs.
+// default-on). No longer invoked by the Worker: the one-compare-per-open-PR cost blew the webhook
+// invocation's subrequest cap on a 42-PR repo, so onPushToDefault and the install/backfill paths
+// dropped it — the pr-minder-reconcile hook runs the same sweep fleet-wide (~40 min worst case).
+// Kept + unit-tested as the ported reference.
 export async function closeEmptyAutoPrs(repo: string, config: PrMinderConfig, token: string, env: Env, log: Logger): Promise<void> {
   if (!config.autoOpenPr.enabled || !config.autoOpenPr.closeWhenEmpty) return;
   const prs = await listOpenPulls(repo, token, log);
@@ -680,7 +684,7 @@ const REVIVE_MIN_AGE_S = 60;
 // a zombie. Degrades to "always check, never record" if the KV binding is somehow absent.
 export async function reviveIfZombie(env: Env, repo: string, pr: any, token: string, log: Logger): Promise<boolean> {
   const sha = pr?.head?.sha;
-  if (pr?.draft || !sha || !isActionsBotPr(pr)) return false;
+  if (!isZombieCandidate(pr)) return false;
   const prev = env.PR_STATE ? await checkedSha(env.PR_STATE, repo, pr.number) : null;
   if (prev === sha) return false;
 
@@ -720,27 +724,43 @@ export async function reviveIfZombie(env: Env, repo: string, pr: any, token: str
 }
 
 // Scheduled re-check sweep (the Worker's cron entry point). reviveIfZombie defers a follow-up commit
-// that's too fresh to judge by leaving a `recheck:` reminder in KV; this drains those once they've
-// aged. It reads only the reminders — when there are none it makes a single KV list and zero GitHub
-// API calls, so the cron is nearly free at rest (not a poll over all PRs). For each pending PR it
-// mints a token for that repo (cached per run), refetches the PR, and re-runs reviveIfZombie, which
-// now either revives a still-CI-less commit or records it. Reminders for closed/missing PRs are
-// cleared. No-ops without a KV binding.
-export async function runRechecks(env: Env, log: Logger): Promise<void> {
+// that's too fresh to judge by leaving a `recheck:` reminder in KV — and the backfill/install paths
+// now enqueue a whole repo's zombie candidates here at once (enqueueZombieRechecks) instead of
+// sweeping inline. It reads only the reminders — when there are none it makes a single KV list and
+// zero GitHub API calls, so the cron is nearly free at rest (not a poll over all PRs). For each
+// pending PR it mints a token for that repo (cached per run), refetches the PR, and re-runs
+// reviveIfZombie, which either revives a still-CI-less commit or records it. Reminders for
+// closed/missing PRs are cleared. `budget.calls` bounds the GitHub calls (same scheme as
+// runConflictChecks) so a bulk enqueue can't blow the cron invocation's subrequest cap; PRs not
+// reached this tick persist and are picked up on the next. No-ops without a KV binding.
+export async function runRechecks(env: Env, log: Logger, budget: { calls: number }): Promise<void> {
   if (!env.PR_STATE) return;
   const pending = await listRechecks(env.PR_STATE);
   if (pending.length === 0) return;
   log.log(`recheck sweep: ${pending.length} pending PR(s)`);
   const tokenByRepo = new Map<string, string | null>();
   for (const { repo, num } of pending) {
+    if (budget.calls <= 0) { log.log(`recheck sweep: budget spent`); break; }
     try {
+      if (!tokenByRepo.has(repo)) budget.calls -= 2; // repoInstallationId + installToken (first sight of repo)
       const token = await tokenForRepo(repo, tokenByRepo, env, log);
       if (!token) continue; // no token (repo uninstalled, or a transient error) — leave it; the TTL bounds it
+      // getPull + reviveIfZombie's worst case (runs check, commit age, close, reopen), charged
+      // unconditionally: over-counting only defers PRs to the next tick, never overshoots the cap.
+      budget.calls -= 5;
       const pr = await getPull(repo, num, token, log);
       if (!pr) continue; // transient fetch failure — leave the reminder for the next sweep
       if (pr.state !== 'open') { await clearRecheck(env.PR_STATE, repo, num); continue; } // closed/merged — done
-      // reviveIfZombie self-manages the reminder: it clears it on a verdict, or (if still somehow
-      // too fresh) leaves a fresh one for the next sweep.
+      // reviveIfZombie declines — WITHOUT clearing — a PR that is no longer a revival candidate:
+      // draft, non-bot, or already checked at its current SHA (a live event settled it between
+      // enqueue and drain). Those verdicts are final for this reminder, so resolve it here; left
+      // alone it would recharge the budget every tick until its TTL.
+      if (!isZombieCandidate(pr) || (await checkedSha(env.PR_STATE, repo, num)) === pr.head.sha) {
+        await clearRecheck(env.PR_STATE, repo, num);
+        continue;
+      }
+      // reviveIfZombie self-manages the reminder from here: it clears it on a verdict, or (if still
+      // somehow too fresh) leaves a fresh one for the next sweep.
       await reviveIfZombie(env, repo, pr, token, log);
     } catch (e) {
       log.log(`recheck ${repo}#${num}: ${(e as Error).message}`);
@@ -851,9 +871,9 @@ async function enqueueConflictChecks(env: Env, prs: any[], repo: string, log: Lo
   if (n) log.log(`${repo}: enqueued ${n} merge-conflict check(s)`);
 }
 
-// Backfill/install entry: when a merge_conflict label is configured, list the repo's open PRs and
-// enqueue a check for each, so pre-existing PRs get their label set without waiting for an event.
-// Gated on the feature being on, so it makes no GitHub call (no PR listing) for repos that don't use it.
+// List-and-enqueue wrapper: when a merge_conflict label is configured, list the repo's open PRs and
+// enqueue a check for each. No longer invoked by the Worker — the backfill/install paths share one
+// pulls listing across all the enqueues (runBackfillEnqueues) instead of listing per capability.
 async function enqueueConflictChecksForRepo(repo: string, config: PrMinderConfig, env: Env, token: string, log: Logger): Promise<void> {
   if (!env.PR_STATE || conflictLabelNames(config).length === 0) return;
   const prs = await listOpenPulls(repo, token, log);
@@ -946,9 +966,10 @@ async function enqueueDescribeChecks(env: Env, prs: any[], repo: string, botLogi
   if (n) log.log(`${repo}: enqueued ${n} describe backfill check(s)`);
 }
 
-// Backfill/install entry: when auto_describe_pr is enabled, list the repo's open PRs and enqueue a
-// describe check for each candidate, so pre-existing undescribed PRs get a description without waiting
-// for an event. Gated on the feature being on, so it makes no GitHub call (no PR listing) where it's off.
+// List-and-enqueue wrapper: when auto_describe_pr is enabled, list the repo's open PRs and enqueue a
+// describe check for each candidate. No longer invoked by the Worker — the backfill/install paths
+// share one pulls listing across all the enqueues (runBackfillEnqueues) instead of listing per
+// capability. Kept exported + unit-tested as the reference for the enqueue semantics.
 export async function enqueueDescribeChecksForRepo(repo: string, config: PrMinderConfig, env: Env, token: string, log: Logger): Promise<void> {
   if (!env.PR_STATE || !config.autoDescribePr.enabled) return;
   const prs = await listOpenPulls(repo, token, log);
@@ -1005,15 +1026,14 @@ export async function runDescribeChecks(env: Env, log: Logger, budget: { calls: 
   }
 }
 
-// Sweep a repo's open PRs through reviveIfZombie. Used by the install/repos-added handlers and the
-// first-webhook backfill. listOpenPulls already carries each PR's author, so we pre-filter to
-// bot-authored candidates (free) before reviveIfZombie spends a KV read / hasWorkflowRuns call —
-// cost is ~1 API call per *bot-authored* open PR not yet checked at its current SHA, so a re-sweep
-// of an already-checked repo is nearly free. Each PR is wrapped so one failure doesn't abort the rest.
+// Sweep a repo's open PRs through reviveIfZombie, inline. No longer invoked by the Worker: even at
+// ~1 API call per bot-authored PR this fanned out past the subrequest cap inside a webhook
+// invocation, so the install/backfill paths enqueue `recheck:` reminders instead
+// (enqueueZombieRechecks) and the budgeted runRechecks drain does the evaluating. Kept as reference.
 async function maybeRetriggerZombiesForRepo(repo: string, config: PrMinderConfig, token: string, env: Env, log: Logger): Promise<void> {
   if (!config.autoTriggerWorkflows) return;
   const prs = await listOpenPulls(repo, token, log);
-  const candidates = prs.filter((pr) => !pr.draft && isActionsBotPr(pr) && pr.head?.sha);
+  const candidates = prs.filter(isZombieCandidate);
   log.log(`${repo}: zombie sweep over ${prs.length} open PRs (${candidates.length} bot-authored)`);
   for (const pr of candidates) {
     try {
@@ -1024,8 +1044,8 @@ async function maybeRetriggerZombiesForRepo(repo: string, config: PrMinderConfig
   }
 }
 
-// The backfill capabilities currently enabled by config. Each corresponds to one catch-up sweep in
-// maybeBackfillRepo; recording which have run (state.ts) is what lets a feature enabled AFTER the
+// The backfill capabilities currently enabled by config. Each corresponds to one catch-up enqueue in
+// runBackfillEnqueues; recording which have run (state.ts) is what lets a feature enabled AFTER the
 // first sweep still be caught up. `conflict` rides the merge_conflict label set and `describe` the
 // auto_describe_pr flag — the same gates the live paths use.
 export function enabledBackfillCaps(config: PrMinderConfig): BackfillCap[] {
@@ -1043,14 +1063,66 @@ export function backfillTodo(done: Set<BackfillCap>, config: PrMinderConfig): Ba
   return enabledBackfillCaps(config).filter((c) => !done.has(c));
 }
 
+// Flag a repo's zombie candidates for the cron's runRechecks instead of evaluating them inline (a
+// `recheck:` KV put each — KV doesn't count against the subrequest cap). Candidates are the same PRs
+// the old inline sweep would have spent a hasWorkflowRuns call on: bot-authored, non-draft, and not
+// yet checked at their current head SHA (a KV read each, so re-flagging an already-checked repo is
+// free). The drain refetches each PR and runs reviveIfZombie, which still revives a first-seen
+// CI-less PR immediately — the verdict is unchanged, just deferred to the budgeted cron instead of
+// spending per-PR GitHub calls inside the webhook invocation.
+async function enqueueZombieRechecks(env: Env, prs: any[], repo: string, log: Logger): Promise<void> {
+  if (!env.PR_STATE) return;
+  let n = 0;
+  for (const pr of prs) {
+    if (!isZombieCandidate(pr)) continue;
+    if ((await checkedSha(env.PR_STATE, repo, pr.number)) === pr.head.sha) continue; // already evaluated at this commit
+    await setRecheck(env.PR_STATE, repo, pr.number);
+    n++;
+  }
+  if (n) log.log(`${repo}: enqueued ${n} zombie re-check(s)`);
+}
+
+// The enqueue-only catch-up shared by the first-webhook backfill and the install/repos-added
+// handlers. Every capability is O(few GitHub calls) inside the webhook invocation: ONE shared pulls
+// listing feeds the per-PR KV enqueues (zombie -> recheck:, conflict -> conflict:, describe ->
+// describe:), drained by the budgeted cron; openpr does no Worker-side work at all — the
+// pr-minder-reconcile hook owns the auto_open_pr catch-up and close-empty fleet-wide (~40 min worst
+// case). The old inline sweeps (a hasWorkflowRuns per bot PR, the per-branch auto_open_pr scan, one
+// compare per open PR) blew the 50-subrequest cap on a 45-branch/42-PR repo — and died BEFORE
+// markBackfilled recorded anything, so every later event from the repo retried the full sweep and
+// died again, 500ing live webhooks forever. Hence the two rules here: nothing per-PR touches GitHub,
+// and each capability is recorded the moment its enqueue completes (failures isolated per cap), so
+// one failure can neither un-record the others nor restart an expensive loop.
+async function runBackfillEnqueues(repo: string, todo: Set<BackfillCap>, done: Set<BackfillCap>, config: PrMinderConfig, env: Env, token: string, log: Logger): Promise<void> {
+  const prs = todo.has('zombie') || todo.has('conflict') || todo.has('describe')
+    ? await listOpenPulls(repo, token, log)
+    : [];
+  const recorded = new Set<BackfillCap>(done);
+  const attempt = async (cap: BackfillCap, work: () => Promise<void>): Promise<void> => {
+    if (!todo.has(cap)) return;
+    try {
+      await work();
+      recorded.add(cap);
+      if (env.PR_STATE) await markBackfilled(env.PR_STATE, repo, recorded);
+    } catch (e) {
+      log.log(`backfill ${repo} [${cap}]: ${(e as Error).message}`);
+    }
+  };
+  await attempt('zombie', () => enqueueZombieRechecks(env, prs, repo, log));
+  await attempt('openpr', async () => log.log(`${repo}: openpr catch-up left to the pr-minder-reconcile hook`));
+  await attempt('conflict', () => enqueueConflictChecks(env, prs, repo, log));
+  await attempt('describe', async () =>
+    enqueueDescribeChecks(env, prs, repo, await appBotLogin(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, log), log));
+}
+
 // First-webhook backfill: the event-driven "check at least once" for repos already installed before a
-// feature shipped (GitHub never re-sends their install event). On a repo's first event we sweep its
-// pre-existing PRs/branches for each enabled capability and record that set in KV. Crucially the
-// record is per-capability, not a single "done" flag: a capability enabled AFTER the first backfill
-// (e.g. turning on auto_open_pr in config) is missing from the set, so a later event re-runs just that
-// catch-up. Without this, enabling a feature on an already-installed repo never swept its pre-existing
-// branches/PRs — the catch-up simply never ran. No cron, no polling; the live
-// opened/reopened/synchronize/push paths handle new and touched PRs/branches going forward.
+// feature shipped (GitHub never re-sends their install event). On a repo's first event we enqueue its
+// pre-existing PRs for each enabled capability (see runBackfillEnqueues — no inline sweeps) and record
+// that set in KV. Crucially the record is per-capability, not a single "done" flag: a capability
+// enabled AFTER the first backfill (e.g. turning on auto_open_pr in config) is missing from the set,
+// so a later event re-runs just that catch-up. Without this, enabling a feature on an
+// already-installed repo never swept its pre-existing branches/PRs — the catch-up simply never ran.
+// The live opened/reopened/synchronize/push paths handle new and touched PRs/branches going forward.
 export async function maybeBackfillRepo(fullName: string, installationId: number, env: Env, log: Logger): Promise<void> {
   if (!env.PR_STATE) return;
   // Cheap permanent gate: once every capability has been backfilled, no later config change can add
@@ -1072,14 +1144,7 @@ export async function maybeBackfillRepo(fullName: string, installationId: number
     const todo = new Set(backfillTodo(done, config));
     if (todo.size === 0) return; // nothing newly enabled since the last sweep
     log.log(`${fullName}: backfill [${[...todo]}] (already: [${[...done]}])`);
-    if (todo.has('zombie')) await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
-    if (todo.has('openpr')) {
-      await maybeOpenPrsForRepo(fullName, config, token, log);
-      await closeEmptyAutoPrs(fullName, config, token, env, log);
-    }
-    if (todo.has('conflict')) await enqueueConflictChecksForRepo(fullName, config, env, token, log);
-    if (todo.has('describe')) await enqueueDescribeChecksForRepo(fullName, config, env, token, log);
-    await markBackfilled(env.PR_STATE, fullName, [...done, ...todo]);
+    await runBackfillEnqueues(fullName, todo, done, config, env, token, log);
   } catch (e) {
     log.log(`maybeBackfill: ${fullName}: ${(e as Error).message}`);
   }
@@ -1094,14 +1159,11 @@ async function onInstallation(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(fullName, config, token, log);
-      await reconcileAutoMerge(fullName, config, token, log);
-      await maybeRetriggerZombiesForRepo(fullName, config, token, env, log);
-      await maybeOpenPrsForRepo(fullName, config, token, log);
-      await enqueueConflictChecksForRepo(fullName, config, env, token, log);
-      await enqueueDescribeChecksForRepo(fullName, config, env, token, log);
-      await closeEmptyAutoPrs(fullName, config, token, env, log);
-      // Ran every sweep, so every currently-enabled capability is now backfilled for this repo.
-      if (env.PR_STATE) await markBackfilled(env.PR_STATE, fullName, enabledBackfillCaps(config));
+      // Enqueue-only catch-up (see runBackfillEnqueues), which also records every currently-enabled
+      // capability as backfilled. The heavy sweeps that used to run here inline — reconcileAutoMerge,
+      // the per-PR zombie revives, the auto_open_pr branch scan, close-empty — are owned by the
+      // pr-minder-reconcile hook, so installing on a big org no longer fans out per repo.
+      await runBackfillEnqueues(fullName, new Set(enabledBackfillCaps(config)), new Set(), config, env, token, log);
       labelCheckedAt.set(fullName, Date.now());
     } catch (e) {
       log.log(`installation: ${fullName}: ${(e as Error).message}`);
@@ -1118,14 +1180,8 @@ async function onReposAdded(p: any, env: Env, log: Logger): Promise<void> {
     try {
       const config = await loadConfig(owner, name, token, log);
       await createConfiguredLabels(repo.full_name, config, token, log);
-      await reconcileAutoMerge(repo.full_name, config, token, log);
-      await maybeRetriggerZombiesForRepo(repo.full_name, config, token, env, log);
-      await maybeOpenPrsForRepo(repo.full_name, config, token, log);
-      await enqueueConflictChecksForRepo(repo.full_name, config, env, token, log);
-      await enqueueDescribeChecksForRepo(repo.full_name, config, env, token, log);
-      await closeEmptyAutoPrs(repo.full_name, config, token, env, log);
-      // Ran every sweep, so every currently-enabled capability is now backfilled for this repo.
-      if (env.PR_STATE) await markBackfilled(env.PR_STATE, repo.full_name, enabledBackfillCaps(config));
+      // Same enqueue-only catch-up as onInstallation; the heavy sweeps live in the reconcile hook.
+      await runBackfillEnqueues(repo.full_name, new Set(enabledBackfillCaps(config)), new Set(), config, env, token, log);
       labelCheckedAt.set(repo.full_name, Date.now());
     } catch (e) {
       log.log(`repos_added: ${repo.full_name}: ${(e as Error).message}`);
@@ -1188,6 +1244,13 @@ async function syncAutoMergeLabelDisabled(repo: string, pr: any, config: PrMinde
 // that account's identity instead and trigger workflows normally.
 export function isActionsBotPr(pr: any): boolean {
   return pr?.user?.login === 'github-actions[bot]';
+}
+
+// A PR that can be a GITHUB_TOKEN zombie and is worth (re-)evaluating: bot-authored, non-draft,
+// with a head commit. The one predicate shared by reviveIfZombie's gate, the backfill enqueue
+// (enqueueZombieRechecks), and the cron drain's reminder-clearing (runRechecks), so they can't drift.
+function isZombieCandidate(pr: any): boolean {
+  return !pr?.draft && !!pr?.head?.sha && isActionsBotPr(pr);
 }
 
 // Which pull_request actions may trigger a zombie revive. opened / reopened / synchronize all
